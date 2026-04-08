@@ -1,0 +1,632 @@
+/* ── Reset & root ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #0f172a;
+  --surface:     #1e293b;
+  --surface2:    #263248;
+  --border:      #334155;
+  --accent:      #22d3ee;
+  --accent-dark: #0e7490;
+  --on:          #22c55e;
+  --off:         #ef4444;
+  --warn:        #f59e0b;
+  --text:        #f1f5f9;
+  --text-dim:    #94a3b8;
+  --digit-font:  "Courier New", "Menlo", monospace;
+  --radius:      10px;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Top bar ──────────────────────────────────────────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  height: 52px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.brand-icon { width: 24px; height: 24px; color: var(--accent); }
+
+.device-tabs {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.device-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s;
+}
+.device-tab:hover { background: var(--surface2); color: var(--text); }
+.device-tab.active {
+  background: var(--surface2);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tab-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--off);
+  flex-shrink: 0;
+}
+.tab-dot.connected { background: var(--on); }
+
+.btn-icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;
+  background: transparent; border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text-dim); cursor: pointer;
+  transition: all .15s; flex-shrink: 0;
+}
+.btn-icon svg { width: 18px; height: 18px; }
+.btn-icon:hover { background: var(--surface2); color: var(--text); }
+
+/* ── Pages ────────────────────────────────────────────────────────────────── */
+#main-content {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+.page {
+  display: none;
+  padding: 24px;
+  min-height: 100%;
+}
+.page.active { display: block; }
+
+/* ── Empty state ──────────────────────────────────────────────────────────── */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 12px; height: 60vh;
+  color: var(--text-dim);
+}
+.empty-state svg { width: 72px; height: 72px; opacity: .35; }
+.empty-state h2 { font-size: 20px; color: var(--text); }
+.empty-state p { text-align: center; max-width: 280px; line-height: 1.6; }
+
+/* ── PSU page layout ──────────────────────────────────────────────────────── */
+.psu-layout { display: flex; flex-direction: column; gap: 16px; max-width: 860px; }.hub-layout { display: flex; flex-direction: column; gap: 16px; max-width: 700px; }
+
+/* Device body – disabled overlay when port is not connected */
+.device-body {
+  display: flex; flex-direction: column; gap: 16px;
+  transition: opacity .25s;
+}
+.psu-layout[data-connected="false"] .device-body,
+.hub-layout[data-connected="false"] .device-body {
+  opacity: 0.42;
+  pointer-events: none;
+  user-select: none;
+}
+.meas-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr) auto;
+  gap: 10px;
+}
+
+.meas-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 14px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.meas-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--text-dim);
+}
+.meas-val-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.meas-value {
+  font-family: var(--digit-font);
+  font-size: 34px; font-weight: 700;
+  color: var(--accent);
+  text-shadow: 0 0 18px rgba(34,211,238,.4);
+  line-height: 1;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  width: 6ch; /* fixed: exactly "xx.xxx" – never grows or shrinks */
+}
+.meas-unit {
+  font-size: 14px; font-weight: 600; color: var(--text-dim);
+  font-family: var(--digit-font);
+  white-space: nowrap;
+}
+
+/* Measurement fill bar (shows reading as % of hardware max) */
+.meas-bar-track {
+  height: 4px;
+  background: var(--surface2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 2px;
+  width: 100%;
+}
+.meas-bar-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width .45s ease;
+}
+.meas-volt .meas-bar-fill { background: var(--accent); }
+.meas-curr .meas-bar-fill { background: #a78bfa; }
+.meas-pow  .meas-bar-fill { background: #fb923c; }
+.meas-volt .meas-value { color: #4ade80; text-shadow: 0 0 18px rgba(74,222,128,.45); font-weight: 700; }
+.meas-curr .meas-value { color: #f87171; text-shadow: 0 0 18px rgba(248,113,113,.45); font-weight: 700; }
+.meas-pow .meas-value  { color: #fb923c; text-shadow: 0 0 18px rgba(251,146,60,.4); }
+
+.status-col {
+  display: flex; flex-direction: column; gap: 8px; justify-content: center;
+  align-items: center; min-width: 110px;
+}
+
+/* PSU output toggle wrap */
+.output-sw-wrap {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.output-state {
+  font-size: 11px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--text-dim); transition: color .2s;
+}
+.toggle-sw--lg[aria-checked="true"] ~ .output-state,
+.output-sw-wrap .output-state.on { color: var(--on); }
+
+.mode-badge {
+  padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 700;
+  background: rgba(34,211,238,.15); color: var(--accent); letter-spacing: .1em;
+}
+.mode-badge.cc { background: rgba(167,139,250,.15); color: #a78bfa; }
+
+.temp-row { display: flex; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.temp-value { color: var(--text); font-family: var(--digit-font); }
+
+/* ── Set controls ─────────────────────────────────────────────────────────── */
+.set-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+}
+.set-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px 22px;
+}
+.set-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--text-dim); margin-bottom: 10px;
+}
+
+/* Row that holds spinbox + unit label side by side */
+.spinbox-row {
+  display: flex; align-items: center; gap: 8px;
+}
+
+/* Wrapper: bar only (value label moved to spinbox-row) */
+.bar-wrap {
+  margin-top: 14px;
+}
+.bar-wrap .set-bar { margin-top: 0; width: 100%; }
+
+/* Inline value badge inside spinbox-row */
+.bar-val {
+  font-size: 13px;
+  font-weight: 700;
+  font-family: var(--digit-font);
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.bar-val--volt { color: #4ade80; border-color: rgba(74,222,128,.35); }
+.bar-val--curr { color: #f87171; border-color: rgba(248,113,113,.35); }
+
+/* Scrollable range bar for set controls – thick capsule with metallic thumb */
+.set-bar {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 26px;
+  border-radius: 13px;
+  outline: none;
+  margin-top: 14px;
+  /* vertical highlight stripe over horizontal fill/dark split */
+  background:
+    linear-gradient(
+      to bottom,
+      rgba(255,255,255,.06) 0%,
+      rgba(255,255,255,.30) 28%,
+      rgba(255,255,255,.06) 55%,
+      rgba(0,0,0,.18) 100%
+    ),
+    linear-gradient(
+      to right,
+      var(--bar-color, var(--accent)) var(--fill-pct, 0%),
+      #06090f var(--fill-pct, 0%)
+    );
+  border: 1px solid rgba(255,255,255,.10);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.65), 0 1px 0 rgba(255,255,255,.04);
+}
+/* WebKit metallic sphere thumb */
+.set-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%,
+    #eeeff0 0%,
+    #b2b5bb 38%,
+    #72767e 68%,
+    #3c3f45 100%
+  );
+  border: 2px solid rgba(255,255,255,.30);
+  box-shadow:
+    0 3px 10px rgba(0,0,0,.75),
+    inset 0 1px 3px rgba(255,255,255,.55),
+    0 0 0 1px rgba(0,0,0,.35);
+  transition: transform .12s, box-shadow .12s;
+}
+.set-bar::-webkit-slider-thumb:active {
+  transform: scale(1.1);
+  box-shadow:
+    0 4px 16px rgba(0,0,0,.85),
+    inset 0 1px 4px rgba(255,255,255,.65),
+    0 0 0 1px rgba(0,0,0,.45);
+}
+/* Firefox track + progress + thumb */
+.set-bar::-moz-range-track {
+  height: 26px;
+  border-radius: 13px;
+  background: #06090f;
+  border: 1px solid rgba(255,255,255,.10);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.65);
+}
+.set-bar::-moz-range-progress {
+  height: 26px;
+  border-radius: 13px 0 0 13px;
+  background: var(--bar-color, var(--accent));
+}
+.set-bar::-moz-range-thumb {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%,
+    #eeeff0 0%,
+    #b2b5bb 38%,
+    #72767e 68%,
+    #3c3f45 100%
+  );
+  border: 2px solid rgba(255,255,255,.30);
+  box-shadow: 0 3px 10px rgba(0,0,0,.75), inset 0 1px 3px rgba(255,255,255,.55);
+}
+.set-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+.spinbox {
+  display: flex; align-items: center; gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+  background: var(--bg);
+}
+.spin-btn {
+  width: 40px; height: 42px;
+  border: none; background: var(--surface2); color: var(--text);
+  font-size: 20px; cursor: pointer; transition: background .1s;
+  flex-shrink: 0;
+}
+.spin-btn:hover { background: var(--accent-dark); color: #fff; }
+.spin-btn:active { background: var(--accent); }
+.spin-input {
+  flex: 1; border: none; background: transparent;
+  color: var(--text); font-family: var(--digit-font);
+  font-size: 22px; font-weight: 600; text-align: center;
+  outline: none; width: 0; /* flex child */
+  -moz-appearance: textfield;
+}
+.spin-input::-webkit-inner-spin-button,
+.spin-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.spin-unit {
+  font-size: 13px; color: var(--text-dim);
+  margin-left: 8px; font-family: var(--digit-font);
+}
+
+/* ── Protection section ───────────────────────────────────────────────────── */
+.protection-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0;
+}
+.protection-section summary {
+  padding: 12px 16px;
+  cursor: pointer; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--text-dim);
+  list-style: none; display: flex; align-items: center; gap: 8px;
+}
+.protection-section summary::before {
+  content: "▶"; font-size: 10px; transition: transform .2s;
+}
+.protection-section[open] summary::before { transform: rotate(90deg); }
+.protection-section .set-row { padding: 0 12px 12px; }
+
+/* ── USB Hub page ─────────────────────────────────────────────────────────── */
+
+
+.ports-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+
+.port-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 16px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  transition: border-color .25s, background .25s;
+  min-width: 120px;
+}
+.port-card.on { border-color: var(--on); background: rgba(34,197,94,.05); }
+.port-label { font-size: 13px; color: var(--text-dim); font-weight: 700; letter-spacing: .06em; }
+
+/* ── Toggle switch (sliding ball) ─────────────────────────────────────────── */
+.toggle-sw {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 64px; height: 32px;
+  border-radius: 16px;
+  border: 2px solid var(--border);
+  background: var(--surface2);
+  cursor: pointer; padding: 0; flex-shrink: 0;
+  transition: background .25s, border-color .25s, box-shadow .25s;
+}
+.toggle-sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle-sw[aria-checked="true"] {
+  background: rgba(34,197,94,.18);
+  border-color: var(--on);
+  box-shadow: 0 0 14px rgba(34,197,94,.3);
+}
+.toggle-knob {
+  position: absolute;
+  left: 3px;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  box-shadow: 0 2px 6px rgba(0,0,0,.5);
+  transition: left .22s cubic-bezier(.4,0,.2,1), background .22s;
+}
+.toggle-sw[aria-checked="true"] .toggle-knob {
+  left: 35px;
+  background: var(--on);
+}
+
+/* larger variant – PSU output */
+.toggle-sw--lg {
+  width: 80px; height: 40px; border-radius: 20px;
+}
+.toggle-sw--lg .toggle-knob { width: 30px; height: 30px; }
+.toggle-sw--lg[aria-checked="true"] .toggle-knob { left: 43px; }
+
+.port-state {
+  font-size: 11px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--text-dim);
+  transition: color .2s;
+}
+.port-card.on .port-state { color: var(--on); }
+
+.hub-ctrl-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.btn-hub-ctrl {
+  padding: 9px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface);
+  color: var(--text-dim); font-size: 13px; cursor: pointer; transition: all .15s;
+}
+.btn-hub-ctrl.active {
+  border-color: var(--accent); color: var(--accent);
+  background: rgba(34,211,238,.1);
+}
+.btn-hub-ctrl:hover { filter: brightness(1.2); }
+
+/* ── Settings page ────────────────────────────────────────────────────────── */
+.settings-card {
+  max-width: 600px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 24px; display: flex; flex-direction: column; gap: 24px;
+}
+.settings-card h2 { font-size: 20px; }
+.settings-card h3 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--text-dim); margin-bottom: 12px; }
+.settings-card section { display: flex; flex-direction: column; gap: 8px; }
+
+.device-form {
+  display: flex; flex-direction: column; gap: 10px; margin-top: 8px;
+}
+.device-form label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .08em;
+}
+.device-form input, .device-form select {
+  padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); font-size: 14px;
+  outline: none; transition: border-color .15s;
+}
+.device-form input:focus, .device-form select:focus { border-color: var(--accent); }
+.form-actions { display: flex; gap: 8px; margin-top: 4px; }
+.port-row { display: flex; gap: 6px; }
+.port-row input { flex: 1; }
+
+.device-entry {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.device-entry-name { flex: 1; font-size: 13px; }
+.device-entry-type { font-size: 11px; color: var(--text-dim); }
+.btn-remove { background: none; border: none; color: var(--off); cursor: pointer; font-size: 18px; }
+.btn-remove:hover { color: #fca5a5; }
+
+.port-suggestions {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;
+}
+.port-chip {
+  padding: 4px 10px; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 20px; font-size: 12px; cursor: pointer; color: var(--text-dim);
+}
+.port-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Common buttons ───────────────────────────────────────────────────────── */
+.btn-primary {
+  padding: 9px 18px; border-radius: 8px;
+  background: var(--accent); color: var(--bg);
+  border: none; font-size: 13px; font-weight: 700; cursor: pointer;
+  transition: filter .15s;
+}
+.btn-primary:hover { filter: brightness(1.12); }
+
+.btn-secondary {
+  padding: 8px 14px; border-radius: 8px;
+  background: var(--surface2); color: var(--text);
+  border: 1px solid var(--border); font-size: 13px; cursor: pointer;
+  transition: filter .15s;
+}
+.btn-secondary:hover { filter: brightness(1.12); }
+
+.btn-ghost {
+  padding: 8px 14px; border-radius: 8px;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); font-size: 13px; cursor: pointer;
+  transition: all .15s;
+}
+.btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
+
+.hidden { display: none !important; }
+
+/* ── Port configuration panel ─────────────────────────────────────────────── */
+.port-cfg-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.port-cfg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.conn-indicator {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--off);
+  box-shadow: 0 0 0 3px rgba(239,68,68,.15);
+  flex-shrink: 0;
+  transition: background .3s, box-shadow .3s;
+}
+.conn-indicator.connected {
+  background: var(--on);
+  box-shadow: 0 0 8px rgba(34,197,94,.5), 0 0 0 3px rgba(34,197,94,.15);
+}
+.port-cfg-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-dim); flex-shrink: 0;
+}
+.port-cfg-select {
+  padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg); color: var(--text);
+  font-size: 13px; outline: none;
+  min-width: 100px; cursor: pointer;
+  transition: border-color .15s;
+}
+.port-cfg-select:focus { border-color: var(--accent); }
+.btn-conn {
+  padding: 6px 16px; border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text);
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: all .15s; margin-left: auto;
+  white-space: nowrap;
+}
+.btn-conn:hover:not(:disabled) { filter: brightness(1.18); }
+.btn-conn:disabled { opacity: .5; cursor: default; }
+.btn-conn.connected {
+  border-color: var(--off);
+  color: var(--off);
+  background: rgba(239,68,68,.08);
+}
+.btn-conn.connecting {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: rgba(245,158,11,.08);
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4b5a72; }
+
+/* ── Multi-device grid ────────────────────────────────────────────────────── */
+.devices-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  padding: 20px;
+  align-items: flex-start;
+  overflow: auto;
+  min-height: 100%;
+}
+/* Device panels inside the container are always visible */
+.devices-container > .page {
+  display: block;
+  padding: 0;
+  min-height: unset;
+  flex-shrink: 0;
+}
+/* Hidden panel (toggled off via tab click) */
+.devices-container > .page.panel-hidden { display: none; }
+
+/* Tab button when its panel is hidden */
+.device-tab.panel-off {
+  opacity: 0.45;
+  border-color: transparent;
+  color: var(--text-dim);
+  text-decoration: line-through;
+}

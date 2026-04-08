@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PowerWing</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-brand">
+    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+    </svg>
+    <span class="brand-name">PowerWing</span>
+  </div>
+  <nav id="device-tabs" class="device-tabs"></nav>
+  <button id="btn-settings" class="btn-icon" title="Settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
+</header>
+
+<main id="main-content">
+  <!-- pages injected by JavaScript -->
+  <div id="page-empty" class="page active">
+    <div class="empty-state">
+      <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M32 8L8 20v24l24 12 24-12V20L32 8z"/>
+        <path d="M32 8v36M8 20l24 12 24-12"/>
+      </svg>
+      <h2>No devices configured</h2>
+      <p>Click <strong>⚙</strong> to add your power supplies and USB hub.</p>
+    </div>
+  </div>
+
+  <!-- Settings page -->
+  <div id="page-settings" class="page">
+    <div class="settings-card">
+      <h2>Settings</h2>
+
+      <section>
+        <h3>Devices</h3>
+        <div id="settings-device-list"></div>
+        <button class="btn-primary" id="btn-add-device">+ Add Device</button>
+      </section>
+
+      <section>
+        <h3>Add / Edit Device</h3>
+        <form id="device-form" class="device-form">
+          <label>ID <input type="text" id="df-id" placeholder="e.g. psu1" required></label>
+          <label>Name <input type="text" id="df-name" placeholder="e.g. Bench PSU" required></label>
+          <label>Type
+            <select id="df-type">
+              <option value="spm3051">SPM3051 (UART)</option>
+              <option value="pd_pocket">PD Pocket (UART)</option>
+              <option value="usbslim">USB-Slim Hub (UART)</option>
+            </select>
+          </label>
+          <label>Port
+            <div class="port-row">
+              <input type="text" id="df-port" placeholder="COM3 or /dev/ttyUSB0" required>
+              <button type="button" class="btn-secondary" id="btn-scan-ports">Scan</button>
+            </div>
+          </label>
+          <label>Baud rate
+            <select id="df-baud">
+              <option value="9600">9600</option>
+              <option value="115200" selected>115200</option>
+              <option value="57600">57600</option>
+              <option value="19200">19200</option>
+            </select>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary">Save Device</button>
+            <button type="button" class="btn-ghost" id="btn-cancel-form">Cancel</button>
+          </div>
+        </form>
+        <div id="port-suggestions" class="port-suggestions hidden"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- All-devices grid (always visible when not on settings/empty) -->
+  <div id="devices-container" class="devices-container hidden"></div>
+</main>
+
+<!-- Templates (hidden) -->
+<template id="tpl-psu">
+  <div class="page" data-device-type="power_supply">
+    <div class="psu-layout">
+      <!-- Port configuration – always visible at top -->
+      <div class="port-cfg-panel">
+        <div class="port-cfg-row">
+          <span class="conn-indicator" title="Disconnected"></span>
+          <span class="port-cfg-label">PORT</span>
+          <select class="port-cfg-select port-sel">
+            <option value="">— select —</option>
+          </select>
+          <span class="port-cfg-label">BPS</span>
+          <select class="port-cfg-select baud-sel">
+            <option value="9600">9600</option>
+            <option value="19200">19200</option>
+            <option value="57600">57600</option>
+            <option value="115200">115200</option>
+          </select>
+          <button class="btn-conn">Connect</button>
+        </div>
+      </div>
+
+      <!-- Device controls (disabled when disconnected) -->
+      <div class="device-body">
+        <!-- Measurements -->
+        <div class="meas-row">
+          <div class="meas-card meas-volt">
+            <div class="meas-label">VOLTAGE</div>
+            <div class="meas-val-row">
+              <div class="meas-value volt-value">0.000</div>
+              <div class="meas-unit">V</div>
+            </div>
+            <div class="meas-bar-track"><div class="meas-bar-fill"></div></div>
+          </div>
+          <div class="meas-card meas-curr">
+            <div class="meas-label">CURRENT</div>
+            <div class="meas-val-row">
+              <div class="meas-value curr-value">0.000</div>
+              <div class="meas-unit">A</div>
+            </div>
+            <div class="meas-bar-track"><div class="meas-bar-fill"></div></div>
+          </div>
+          <div class="meas-card meas-pow">
+            <div class="meas-label">POWER</div>
+            <div class="meas-val-row">
+              <div class="meas-value pow-value">0.00</div>
+              <div class="meas-unit">W</div>
+            </div>
+            <div class="meas-bar-track"><div class="meas-bar-fill"></div></div>
+          </div>
+          <div class="status-col">
+            <div class="output-sw-wrap">
+              <div class="set-label">OUTPUT</div>
+              <button class="toggle-sw toggle-sw--lg" role="switch" aria-checked="false" data-cmd="set_outp">
+                <span class="toggle-knob"></span>
+              </button>
+              <div class="output-state">OFF</div>
+            </div>
+            <div class="mode-badge">CV</div>
+            <div class="temp-row">
+              <span class="temp-label">Temp</span>
+              <span class="temp-value">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Set controls -->
+        <div class="set-row">
+          <div class="set-card">
+            <div class="set-label">SET VOLTAGE</div>
+            <div class="spinbox-row">
+              <div class="spinbox" data-cmd="set_volt" data-min="0" data-max="36" data-step="0.1" data-decimals="2">
+                <input class="spin-input" type="number" step="0.1" min="0" max="36" value="0.00">
+              </div>
+              <span class="bar-val bar-val--volt">0.00</span>
+              <span class="spin-unit">V</span>
+            </div>
+            <div class="bar-wrap">
+              <input type="range" class="set-bar" min="0" max="36" step="0.1" value="0">
+            </div>
+          </div>
+          <div class="set-card">
+            <div class="set-label">SET CURRENT</div>
+            <div class="spinbox-row">
+              <div class="spinbox" data-cmd="set_curr" data-min="0" data-max="10" data-step="0.01" data-decimals="2">
+                <input class="spin-input" type="number" step="0.01" min="0" max="10" value="0.00">
+              </div>
+              <span class="bar-val bar-val--curr">0.00</span>
+              <span class="spin-unit">A</span>
+            </div>
+            <div class="bar-wrap">
+              <input type="range" class="set-bar" min="0" max="10" step="0.01" value="0">
+            </div>
+          </div>
+        </div>
+
+        <!-- Protection -->
+        <details class="protection-section">
+          <summary>Protection Limits</summary>
+          <div class="set-row">
+            <div class="set-card">
+              <div class="set-label">OVP LIMIT</div>
+              <div class="spinbox-row">
+                <div class="spinbox" data-cmd="set_ovp" data-min="0" data-max="40" data-step="0.1" data-decimals="2">
+                  <input class="spin-input" type="number" step="0.1" min="0" max="40" value="0.00">
+                </div>
+                <span class="bar-val bar-val--volt">0.00</span>
+                <span class="spin-unit">V</span>
+              </div>
+              <div class="bar-wrap">
+                <input type="range" class="set-bar" min="0" max="40" step="0.1" value="0">
+              </div>
+            </div>
+            <div class="set-card">
+              <div class="set-label">OCP LIMIT</div>
+              <div class="spinbox-row">
+                <div class="spinbox" data-cmd="set_ocp" data-min="0" data-max="10" data-step="0.1" data-decimals="2">
+                  <input class="spin-input" type="number" step="0.1" min="0" max="10" value="0.00">
+                </div>
+                <span class="bar-val bar-val--curr">0.00</span>
+                <span class="spin-unit">A</span>
+              </div>
+              <div class="bar-wrap">
+                <input type="range" class="set-bar" min="0" max="10" step="0.1" value="0">
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-hub">
+  <div class="page" data-device-type="usb_hub">
+    <div class="hub-layout">
+      <!-- Port configuration – always visible at top -->
+      <div class="port-cfg-panel">
+        <div class="port-cfg-row">
+          <span class="conn-indicator" title="Disconnected"></span>
+          <span class="port-cfg-label">PORT</span>
+          <select class="port-cfg-select port-sel">
+            <option value="">— select —</option>
+          </select>
+          <span class="port-cfg-label">BPS</span>
+          <select class="port-cfg-select baud-sel">
+            <option value="9600">9600</option>
+            <option value="19200">19200</option>
+            <option value="57600">57600</option>
+            <option value="115200">115200</option>
+          </select>
+          <button class="btn-conn">Connect</button>
+        </div>
+      </div>
+
+      <!-- Device controls (disabled when disconnected) -->
+      <div class="device-body">
+        <div class="ports-row">
+          <!-- 4 port cards inserted by JS -->
+        </div>
+        <div class="hub-ctrl-row">
+          <button class="btn-hub-ctrl" data-cmd="set_lock" data-param="locked" data-state="false">🔒 Lock OFF</button>
+          <button class="btn-hub-ctrl" data-cmd="set_hwkeys" data-param="enabled" data-state="true">⌨ HW Keys ON</button>
+          <button class="btn-hub-ctrl" data-cmd="set_autosave" data-param="enabled" data-state="false">💾 Auto-Save OFF</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

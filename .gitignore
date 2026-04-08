@@ -1,0 +1,32 @@
+# Binaries
+power_wing
+power_wing.exe
+*.exe
+*.out
+
+# Build output
+/dist/
+/build/
+
+# Go toolchain
+/vendor/
+*.test
+*.prof
+coverage.out
+go.sum.bak
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Serial / runtime
+*.log
+config.json

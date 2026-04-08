@@ -1,0 +1,17 @@
+ protocol: (NOT include comments in brackets and before of colon): 
+	OUT PUT ON: 4f 55 54 50 20 4f 4e 0d 0a   (OUTP ON)	
+	OUT PUT OFF: 4f 55 54 50 20 4f 46 46 0d 0a  (OUTP OFF)
+	OUTPUT Voltage: 56 4f 4c 54  20 35 2e 30  0d 0a   (VOLT 5.0)
+	OUTPUT Current: 43 55 52 52  20 20 30 2e  34 36 0d 0a  (CURR  0.46)
+	OCP Limit: 43 55 52 52  3a 4c 49 4d  20 34 2e 30  0d 0a  (CURR:LIM 4.0)
+	OVP Limit: 56 4f 4c 54  3a 4c 49 4d  20 31 30 2e  30 0d 0a (VOLT:LIM 10.0.)
+	Measurement see following snapshot of UART:
+  23    OUT    4d 45 41 53  75 72 65 3a  41 4c 4c 3a  49 4e 46 4f  MEASure:ALL:INFO        34.1.0        
+               3f 0a                                               ?.                      34.1.16       
+  23    IN     35 2e 30 31  30 2c 30 2e  30 30 30 2c  30 2e 30 30  5.010,0.000,0.00        35.1.0        
+               30 2c 4f 46  46 2c 4f 46  46 2c 4f 46  46 2c 31 0d  0,OFF,OFF,OFF,1.        35.1.16       
+  23    IN     0a                                                  .                       36.1.0        
+  23    OUT    3a 43 4f 4e  46 69 67 75  72 65 3a 41  4c 4c 3f 0a  :CONFigure:ALL?.        37.1.0        
+  23    IN     56 4f 4c 54  3a 44 43 2c  2b 30 2e 30  30 30 36 56  VOLT:DC,+0.0006V        38.1.0        
+               2c 41 55 54  4f 2c 32 56  0d 0a                     ,AUTO,2V..         	
+	
