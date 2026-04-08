@@ -1,4 +1,7 @@
  protocol: (NOT include comments in brackets and before of colon): 
+ query output state:
+ 4F 55 54 50 3F 0A (OUTP?)
+
 	OUT PUT ON: 4f 55 54 50 20 4f 4e 0d 0a   (OUTP ON)	
 	OUT PUT OFF: 4f 55 54 50 20 4f 46 46 0d 0a  (OUTP OFF)
 	OUTPUT Voltage: 56 4f 4c 54  20 35 2e 30  0d 0a   (VOLT 5.0)
@@ -14,4 +17,33 @@
   23    OUT    3a 43 4f 4e  46 69 67 75  72 65 3a 41  4c 4c 3f 0a  :CONFigure:ALL?.        37.1.0        
   23    IN     56 4f 4c 54  3a 44 43 2c  2b 30 2e 30  30 30 36 56  VOLT:DC,+0.0006V        38.1.0        
                2c 41 55 54  4f 2c 32 56  0d 0a                     ,AUTO,2V..         	
+
+BOOT snapshot:
+  23    OUT    4f 55 54 50  3f 0a                                  OUTP?.                   7.1.0        
+  23    IN     4f 4e 0d 0a                                         ON..                     8.1.0        
+  23    OUT    56 4f 4c 54  3f 0a                                  VOLT?.                   9.1.0        
+  23    IN     35 2e 34 30  30 0d 0a                               5.400..                 10.1.0        
+  23    OUT    43 55 52 52  3f 0a                                  CURR?.                  11.1.0        
+  23    IN     34 2e 39 30  30 0d 0a                               4.900..                 12.1.0        
+  23    OUT    56 4f 4c 54  3a 4c 49 4d  3f 0a                     VOLT:LIM?.              13.1.0        
+  23    IN     39 2e 30 30  30 0d 0a                               9.000..                 14.1.0        
+  23    OUT    43 55 52 52  3a 4c 49 4d  3f 0a                     CURR:LIM?.              15.1.0        
+  23    IN     35 2e 30 30  30 0d 0a                               5.000..                 16.1.0        
+  23    OUT    53 59 53 54  65 6d 3a 52  45 4d 6f 74  65 0d 0a     SYSTem:REMote..         17.1.0        
+  23    OUT    2a 49 44 4e  3f 0a                                  *IDN?.                  18.1.0        
+  23    IN     4f 57 4f 4e  2c 53 50 4d  33 30 35 31  2c 32 34 34  OWON,SPM3051,244        19.1.0        
+               36 30 34 36  37 2c 46 56  3a 56 32 2e  30 2e 30 0d  60467,FV:V2.0.0.        19.1.16       
+  23    IN     0a                                                  .                       20.1.0        
+  23    OUT    43 4f 4e 46  69 67 75 72  65 3a 41 4c  4c 3f 0a     CONFigure:ALL?.         21.1.0        
+  23    IN     56 4f 4c 54  3a 44 43 2c  2b 30 2e 30  30 30 31 56  VOLT:DC,+0.0001V        22.1.0        
+               2c 41 55 54  4f 2c 32 56  0d 0a                     ,AUTO,2V..              22.1.16       
+  23    OUT    4d 55 4c 54  69 6d 65 74  65 72 3a 48  4f 4c 44 3f  MULTimeter:HOLD?        23.1.0        
+               0a                                                  .                       23.1.16       
+  23    IN     4f 46 46 0d  0a                                     OFF..                   24.1.0        
+  23    OUT    3a 56 4f 4c  54 3a 44 43  3a 4e 55 4c  4c 3f 0a     :VOLT:DC:NULL?.         25.1.0        
+  23    IN     4f 46 46 0d  0a                                     OFF..                   26.1.0        
+  23    OUT    4d 45 41 53  75 72 65 3a  41 4c 4c 3a  49 4e 46 4f  MEASure:ALL:INFO        27.1.0        
+               3f 0a                                               ?.                      27.1.16       
+  23    IN     35 2e 33 38  30 2c 30 2e  30 30 30 2c  30 2e 30 30  5.380,0.000,0.00        28.1.0        
+               30 2c 4f 46  46 2c 4f 46  46 2c 4f 46  46 2c 31 0d  0,OFF,OFF,OFF,1.        28.1.16                    
 	

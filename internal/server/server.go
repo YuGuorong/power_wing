@@ -305,6 +305,25 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]string{"status": "ok"})
 
+	case "rename":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 256))
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		if err := s.mgr.RenameDevice(id, req.Name); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+
 	case "disconnect":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "POST only")

@@ -33,6 +33,7 @@ const (
 	readTimeout    = 150 * time.Millisecond // per-Read call timeout; device responds in <10ms
 	deviceTypeName = "pd_pocket"
 	tempPollEvery  = 10 // query temperature only every N polls (~10 s at 1 s interval)
+	maxCommErrors  = 3  // consecutive I/O errors before declaring disconnected
 )
 
 // PDPocket drives a PD Pocket power supply over its virtual COM port.
@@ -55,8 +56,9 @@ type PDPocket struct {
 	temperature   float64
 
 	// poll bookkeeping
-	initDone  bool // set-point read-back done on first GetState after connect
-	pollCount int  // incremented each GetState; used to throttle slow queries
+	initDone    bool // set-point read-back done on first GetState after connect
+	pollCount   int  // incremented each GetState; used to throttle slow queries
+	commErrCnt  int  // consecutive I/O errors; disconnect only after threshold
 }
 
 // New creates a new PDPocket driver.  baud=0 uses 115200.
@@ -83,6 +85,12 @@ func (p *PDPocket) Connect() error {
 	if p.connected {
 		return nil
 	}
+	// Close any stale handle left from a previous error-disconnect so that
+	// the OS port is free to reopen (Windows: prevents "access denied").
+	if p.conn != nil {
+		_ = p.conn.Close()
+		p.conn = nil
+	}
 	mode := &serial.Mode{
 		BaudRate: p.baud,
 		DataBits: 8,
@@ -101,17 +109,35 @@ func (p *PDPocket) Connect() error {
 	p.connected = true
 	p.initDone = false // re-read set-points on next GetState
 	p.pollCount = 0
+	p.commErrCnt = 0
+	// Flush any stale bytes left in the OS serial buffers from before the
+	// disconnect. Without this a reconnected port may read garbage on the
+	// first query and immediately hit maxCommErrors again.
+	_ = sp.ResetInputBuffer()
+	_ = sp.ResetOutputBuffer()
 	return nil
 }
 
 func (p *PDPocket) Disconnect() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.connected {
+	return p.disconnectLocked()
+}
+
+// disconnectLocked closes the port and resets connection state.
+// Must be called with p.mu held.
+func (p *PDPocket) disconnectLocked() error {
+	if !p.connected && p.conn == nil {
 		return nil
 	}
 	p.connected = false
-	return p.conn.Close()
+	p.commErrCnt = 0
+	var err error
+	if p.conn != nil {
+		err = p.conn.Close()
+		p.conn = nil
+	}
+	return err
 }
 
 // ─── internal helpers ─────────────────────────────────────────────────────────
@@ -181,19 +207,35 @@ func (p *PDPocket) GetState(ctx context.Context) (*device.PowerState, error) {
 	// ── Core measurements (every poll, target <100 ms total) ────────────────
 	voltMeasStr, err := p.query("MEAS:VOLT?")
 	if err != nil {
-		p.connected = false
-		return nil, fmt.Errorf("GetState VOLT: %w", err)
+		p.commErrCnt++
+		if p.commErrCnt >= maxCommErrors {
+			errCount := p.commErrCnt
+			_ = p.disconnectLocked()
+			return nil, fmt.Errorf("GetState VOLT (%d consecutive errors): %w", errCount, err)
+		}
+		return &device.PowerState{Connected: true, VoltSet: p.voltSet, CurrSet: p.currSet, OutputOn: p.outputOnKnown && p.outputOn}, nil
 	}
 	currMeasStr, err := p.query("MEAS:CURR?")
 	if err != nil {
-		p.connected = false
-		return nil, fmt.Errorf("GetState CURR: %w", err)
+		p.commErrCnt++
+		if p.commErrCnt >= maxCommErrors {
+			errCount := p.commErrCnt
+			_ = p.disconnectLocked()
+			return nil, fmt.Errorf("GetState CURR (%d consecutive errors): %w", errCount, err)
+		}
+		return &device.PowerState{Connected: true, VoltSet: p.voltSet, CurrSet: p.currSet, OutputOn: p.outputOnKnown && p.outputOn}, nil
 	}
 	powMeasStr, err := p.query("MEAS:POW?")
 	if err != nil {
-		p.connected = false
-		return nil, fmt.Errorf("GetState POW: %w", err)
+		p.commErrCnt++
+		if p.commErrCnt >= maxCommErrors {
+			errCount := p.commErrCnt
+			_ = p.disconnectLocked()
+			return nil, fmt.Errorf("GetState POW (%d consecutive errors): %w", errCount, err)
+		}
+		return &device.PowerState{Connected: true, VoltSet: p.voltSet, CurrSet: p.currSet, OutputOn: p.outputOnKnown && p.outputOn}, nil
 	}
+	p.commErrCnt = 0 // successful round-trip resets the error counter
 
 	// ── Set-point read-back: only once after connect ─────────────────────────
 	// Afterwards voltSet / currSet are kept in sync by SetVoltage / SetCurrent.

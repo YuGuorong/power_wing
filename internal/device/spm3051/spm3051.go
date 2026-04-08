@@ -1,12 +1,18 @@
 // Package spm3051 implements device.PowerSupply for the SPM3051 UART lab PSU.
 //
-// Protocol summary (SCPI-like, all commands terminated with \r\n):
+// Protocol summary (SCPI-like, queries terminated with \n, set commands with \r\n):
 //
 //	OUTP ON / OUTP OFF          – enable / disable output
+//	OUTP?                       – query output state → "ON" or "OFF"
 //	VOLT <v>                    – set output voltage (V)
+//	VOLT?                       – query set voltage
 //	CURR <a>                    – set output current limit (A)
+//	CURR?                       – query set current
 //	VOLT:LIM <v>                – set OVP trip voltage
+//	VOLT:LIM?                   – query OVP limit
 //	CURR:LIM <a>                – set OCP current threshold
+//	CURR:LIM?                   – query OCP limit
+//	SYSTem:REMote               – enable remote-control mode
 //	MEASure:ALL:INFO?\n         – query: "V,A,W,OUT,OVP,OCP,x\r\n"
 package spm3051
 
@@ -25,8 +31,9 @@ import (
 
 const (
 	defaultBaud    = 9600
-	readTimeout    = 2 * time.Second
+	readTimeout    = 500 * time.Millisecond // device at 9600 baud responds in <100 ms
 	deviceTypeName = "spm3051"
+	maxCommErrors  = 3 // consecutive I/O errors before declaring disconnected
 )
 
 // SPM3051 drives a SPM3051 power supply over a UART/USB-CDC port.
@@ -40,11 +47,14 @@ type SPM3051 struct {
 	conn      serial.Port
 	connected bool
 
-	// cached set-points (device has no query command for these)
-	voltSet float64
-	currSet float64
-	ovpLim  float64
-	ocpLim  float64
+	// cached set-points (seeded from device on connect via VOLT?, CURR?, etc.)
+	voltSet  float64
+	currSet  float64
+	ovpLim   float64
+	ocpLim   float64
+	outputOn bool
+
+	commErrCnt int // consecutive I/O errors; disconnects only after threshold
 }
 
 // New creates a new SPM3051 driver.  baud=0 uses the hardware default (9600).
@@ -71,6 +81,11 @@ func (s *SPM3051) Connect() error {
 	if s.connected {
 		return nil
 	}
+	// Close any stale handle so the OS port is free to reopen (Windows: prevents "access denied").
+	if s.conn != nil {
+		_ = s.conn.Close()
+		s.conn = nil
+	}
 	mode := &serial.Mode{
 		BaudRate: s.baud,
 		DataBits: 8,
@@ -87,20 +102,66 @@ func (s *SPM3051) Connect() error {
 	}
 	s.conn = p
 	s.connected = true
+	s.commErrCnt = 0
+	// Flush stale OS buffer bytes from before disconnect to prevent garbage
+	// reads on the first query after reconnect.
+	_ = p.ResetInputBuffer()
+	_ = p.ResetOutputBuffer()
+	// Follow the BOOT snapshot: query all set-points and enter remote mode.
+	s.bootQuery()
 	return nil
 }
 
 func (s *SPM3051) Disconnect() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.connected {
+	return s.disconnectLocked()
+}
+
+// disconnectLocked closes the port and resets connection state.
+// Must be called with s.mu held.
+func (s *SPM3051) disconnectLocked() error {
+	if !s.connected && s.conn == nil {
 		return nil
 	}
 	s.connected = false
-	return s.conn.Close()
+	s.commErrCnt = 0
+	var err error
+	if s.conn != nil {
+		err = s.conn.Close()
+		s.conn = nil
+	}
+	return err
 }
 
 // ─── internal helpers ─────────────────────────────────────────────────────────
+
+// bootQuery follows the BOOT snapshot sequence: queries the device for its
+// current set-points and switches it into remote-control mode.
+// Must be called with s.mu held and s.connected == true.
+func (s *SPM3051) bootQuery() {
+	parseF := func(resp string) float64 {
+		v, _ := strconv.ParseFloat(strings.TrimSpace(resp), 64)
+		return v
+	}
+	if resp, err := s.query("OUTP?"); err == nil {
+		s.outputOn = strings.EqualFold(strings.TrimSpace(resp), "ON")
+	}
+	if resp, err := s.query("VOLT?"); err == nil {
+		s.voltSet = parseF(resp)
+	}
+	if resp, err := s.query("CURR?"); err == nil {
+		s.currSet = parseF(resp)
+	}
+	if resp, err := s.query("VOLT:LIM?"); err == nil {
+		s.ovpLim = parseF(resp)
+	}
+	if resp, err := s.query("CURR:LIM?"); err == nil {
+		s.ocpLim = parseF(resp)
+	}
+	// Put device in remote-control mode (no response expected).
+	_ = s.write("SYSTem:REMote\r\n")
+}
 
 func (s *SPM3051) write(data string) error {
 	_, err := s.conn.Write([]byte(data))
@@ -148,10 +209,27 @@ func (s *SPM3051) GetState(_ context.Context) (*device.PowerState, error) {
 	}
 	resp, err := s.query("MEASure:ALL:INFO?")
 	if err != nil {
-		s.connected = false
-		return nil, fmt.Errorf("GetState: %w", err)
+		s.commErrCnt++
+		if s.commErrCnt >= maxCommErrors {
+			errCount := s.commErrCnt
+			_ = s.disconnectLocked()
+			return nil, fmt.Errorf("GetState (%d consecutive errors): %w", errCount, err)
+		}
+		// Transient error – return last-known state so the UI doesn't flicker.
+		return &device.PowerState{
+			Connected: true,
+			VoltSet:   s.voltSet,
+			CurrSet:   s.currSet,
+			OVPLimit:  s.ovpLim,
+			OCPLimit:  s.ocpLim,
+			OutputOn:  s.outputOn,
+		}, nil
 	}
-	// Expected: "V,A,W,OUT,OVP,OCP,x"
+	s.commErrCnt = 0 // successful round-trip resets the error counter
+	// Expected: "V,A,W,OVP_trig,OCP_trig,x,mode"
+	// NOTE: fields [3],[4],[5] are protection-trigger flags, NOT the PSU output
+	// state. OUTP? is the authoritative source for OutputOn; it is seeded at
+	// connect and kept in sync by SetOutput().
 	parts := strings.Split(resp, ",")
 	if len(parts) < 6 {
 		return nil, fmt.Errorf("GetState: unexpected response: %q", resp)
@@ -167,9 +245,9 @@ func (s *SPM3051) GetState(_ context.Context) (*device.PowerState, error) {
 		VoltMeas:     f(0),
 		CurrMeas:     f(1),
 		PowerMeas:    f(2),
-		OutputOn:     b(3),
-		OVPTriggered: b(4),
-		OCPTriggered: b(5),
+		OutputOn:     s.outputOn, // authoritative: tracked via OUTP? and SetOutput
+		OVPTriggered: b(3),
+		OCPTriggered: b(4),
 		// local cache
 		VoltSet:  s.voltSet,
 		CurrSet:  s.currSet,
@@ -215,7 +293,11 @@ func (s *SPM3051) SetOutput(_ context.Context, on bool) error {
 	if on {
 		cmd = "OUTP ON\r\n"
 	}
-	return s.write(cmd)
+	if err := s.write(cmd); err != nil {
+		return err
+	}
+	s.outputOn = on
+	return nil
 }
 
 func (s *SPM3051) SetOVP(_ context.Context, volts float64) error {

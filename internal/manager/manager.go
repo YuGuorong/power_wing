@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,7 @@ type Manager struct {
 	mu      sync.RWMutex
 	devices map[string]device.Device // id → device
 	states  map[string]interface{}   // id → *PowerState | *HubState
+	renames map[string]string        // id → user-set display name override
 
 	// manualDisconnect holds IDs that the user explicitly disconnected.
 	// The auto-reconnect loop skips these until the user reconnects.
@@ -80,6 +82,7 @@ func New(cfg *config.Config) *Manager {
 		cfg:              cfg,
 		devices:          make(map[string]device.Device),
 		states:           make(map[string]interface{}),
+		renames:          make(map[string]string),
 		manualDisconnect: make(map[string]bool),
 		cmdCh:            make(chan CmdRequest, 32),
 		stopCh:           make(chan struct{}),
@@ -98,6 +101,9 @@ func (m *Manager) Start() error {
 			continue
 		}
 		m.devices[dc.ID] = dev
+		if dc.Name != "" {
+			m.renames[dc.ID] = dc.Name
+		}
 		if err := dev.Connect(); err != nil {
 			log.Printf("[manager] %s: connect failed (will retry): %v", dc.ID, err)
 		} else {
@@ -164,9 +170,13 @@ func (m *Manager) Devices() []DeviceInfo {
 	}
 	for _, dev := range m.devices {
 		cm := connMap[dev.ID()]
+		name := m.renames[dev.ID()]
+		if name == "" {
+			name = dev.Name()
+		}
 		out = append(out, DeviceInfo{
 			ID:        dev.ID(),
-			Name:      dev.Name(),
+			Name:      name,
 			Type:      dev.Type(),
 			Connected: dev.IsConnected(),
 			Port:      cm.port,
@@ -174,6 +184,23 @@ func (m *Manager) Devices() []DeviceInfo {
 		})
 	}
 	return out
+}
+
+// RenameDevice updates the display name for a device and persists it to config.
+func (m *Manager) RenameDevice(id, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("device name cannot be empty")
+	}
+	m.mu.Lock()
+	if _, ok := m.devices[id]; !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("unknown device %q", id)
+	}
+	m.renames[id] = name
+	m.mu.Unlock()
+	m.cfg.UpdateDeviceName(id, name)
+	return m.cfg.Save()
 }
 
 // LatestState returns the most recently polled state for a device.

@@ -506,6 +506,49 @@ function buildPortPanel(el, d) {
   const indicator = $('.conn-indicator', el);
   if (!portSel || !btn) return;
 
+  // Editable device name label
+  const nameLabel = $('.device-name-label', el);
+  if (nameLabel) {
+    nameLabel.textContent = d.name;
+    nameLabel.addEventListener('click', () => {
+      nameLabel.contentEditable = 'true';
+      nameLabel.focus();
+      const range = document.createRange();
+      range.selectNodeContents(nameLabel);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+    const doRename = async () => {
+      nameLabel.contentEditable = 'false';
+      const newName = nameLabel.textContent.trim();
+      if (!newName || newName === d.name) {
+        nameLabel.textContent = d.name; // revert if unchanged or empty
+        return;
+      }
+      const resp = await fetch(`/api/device/${d.id}/rename`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ name: newName }),
+      }).catch(() => null);
+      if (resp && resp.ok) {
+        d.name = newName;
+        if (state.devices[d.id]) state.devices[d.id].name = newName;
+        // Update all other name labels for this device (e.g. after reconnect).
+        $$('.device-name-label', document.getElementById(`page-${d.id}`) || el)
+          .forEach(l => { if (l !== nameLabel) l.textContent = newName; });
+        renderTabs();
+      } else {
+        nameLabel.textContent = d.name; // revert on error
+      }
+    };
+    nameLabel.addEventListener('blur', doRename);
+    nameLabel.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter')  { e.preventDefault(); nameLabel.blur(); }
+      if (e.key === 'Escape') { nameLabel.textContent = d.name; nameLabel.contentEditable = 'false'; }
+    });
+  }
+
   // Pre-fill port/baud from the device config.
   if (d.port) {
     if (![...portSel.options].some(o => o.value === d.port)) {
@@ -732,9 +775,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (form) form.parentElement.scrollIntoView({ behavior: 'smooth' });
   });
 
-  // Cancel form
+  // Cancel form – reset and return to the devices view
   document.getElementById('btn-cancel-form')?.addEventListener('click', () => {
     document.getElementById('device-form')?.reset();
+    // Navigate back: show devices grid if any devices exist, else empty state
+    showPage('settings');  // hide settings
+    document.getElementById('page-settings').classList.remove('active');
+    if (Object.keys(state.devices).length > 0) {
+      document.getElementById('devices-container').classList.remove('hidden');
+    } else {
+      showPage('empty');
+    }
   });
 
   // Scan ports

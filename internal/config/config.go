@@ -90,6 +90,16 @@ func (c *Config) UpsertDevice(dev DeviceConfig) {
 	c.Devices = append(c.Devices, dev)
 }
 
+// UpdateDeviceName changes the display name for an existing device entry.
+func (c *Config) UpdateDeviceName(id, name string) {
+	for i, d := range c.Devices {
+		if d.ID == id {
+			c.Devices[i].Name = name
+			return
+		}
+	}
+}
+
 // UpdateDeviceConn updates the serial port and baud for an existing device entry.
 // Pass empty string for port or 0 for baud to keep the current value.
 func (c *Config) UpdateDeviceConn(id, port string, baud int) {
