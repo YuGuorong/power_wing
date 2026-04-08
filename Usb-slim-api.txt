@@ -55,4 +55,8 @@ Lock off
   74    IN     55 5a 06 00  00 06                                  UZ....                  40.1.0        
   74    OUT    55 5a 07 00  00 07                                  UZ....                  41.1.0        
   74    IN     55 5a 07 00  00 07                                  UZ....                  42.1.0        
-  
+query all port status
+55 5A 00 0F 00 0F
+to query all port status
+The HUB return like:
+55 5A 00 01 01 02 55 5A 00 02 01 03 55 5A 00 04 01 05 55 5A 00 08 00 08

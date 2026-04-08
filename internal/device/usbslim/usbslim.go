@@ -1,17 +1,20 @@
 // Package usbslim implements device.USBHub for the USB-Slim 4-port USB hub.
 //
 // Binary protocol over UART (baud configurable, default 9600):
-//   Frame: 55 5A CMD PORT VAL [VAL2] CKSUM
-//   CKSUM  = sum of all bytes after the 55 5A header.
+//
+//	Frame: 55 5A CMD PORT VAL [VAL2] CKSUM
+//	CKSUM  = sum of all bytes after the 55 5A header.
 //
 // Port mask: PORT1=0x01  PORT2=0x02  PORT3=0x04  PORT4=0x08
 //
 // Commands:
-//   01 <port> <0|1>   – port OFF / ON
-//   06 00 <0|1>       – lock OFF / ON  (requires follow-up 07 00 00)
-//   09 00 <0|1>       – HW keys disable/enable  (requires follow-up 0A 00 00)
-//   0F 00 <0|1>       – auto-save disable/enable (requires follow-up 10 00 00)
-//   0B 0F 01 01       – default ON for all ports
+//
+//	00 0F 00 0F       – query all port states (hub replies with 4×6-byte frames)
+//	01 <port> <0|1>   – port OFF / ON
+//	06 00 <0|1>       – lock OFF / ON  (requires follow-up 07 00 00)
+//	09 00 <0|1>       – HW keys disable/enable  (requires follow-up 0A 00 00)
+//	0F 00 <0|1>       – auto-save disable/enable (requires follow-up 10 00 00)
+//	0B 0F 01 01       – default ON for all ports
 package usbslim
 
 import (
@@ -30,14 +33,15 @@ const (
 	ackTimeout     = 500 * time.Millisecond
 	deviceTypeName = "usbslim"
 
-	cmdPort     byte = 0x01
-	cmdLock     byte = 0x06
-	cmdLockConf byte = 0x07
-	cmdHWKey    byte = 0x09
-	cmdHWKeyConf byte = 0x0A
-	cmdAutoSave byte = 0x0F
+	cmdQuery        byte = 0x00
+	cmdPort         byte = 0x01
+	cmdLock         byte = 0x06
+	cmdLockConf     byte = 0x07
+	cmdHWKey        byte = 0x09
+	cmdHWKeyConf    byte = 0x0A
+	cmdAutoSave     byte = 0x0F
 	cmdAutoSaveConf byte = 0x10
-	cmdDefault  byte = 0x0B
+	cmdDefault      byte = 0x0B
 )
 
 // USBSlim drives a USB-Slim 4-port hub over its UART interface.
@@ -102,8 +106,16 @@ func (u *USBSlim) Connect() error {
 		p.Close()
 		return fmt.Errorf("usbslim %s: set timeout: %w", u.id, err)
 	}
+	// Assert DTR so the USB-CDC adapter (CH340/CP210x) enables its TX path.
+	// Without this many adapters silently drop all writes.
+	if err := p.SetDTR(true); err != nil {
+		p.Close()
+		return fmt.Errorf("usbslim %s: set DTR: %w", u.id, err)
+	}
 	u.conn = p
 	u.connected = true
+	// Seed real port state from the device.
+	_ = u.queryAllPorts()
 	return nil
 }
 
@@ -153,7 +165,48 @@ func (u *USBSlim) send(frame []byte) error {
 }
 
 // portMask maps port index (0-based) to mask byte.
-var portMask = [4]byte{0x01, 0x02, 0x04, 0x08}
+var portMasks = [4]byte{0x01, 0x02, 0x04, 0x08}
+
+// queryAllPorts sends the status-query command and parses the hub's reply.
+// The hub returns 4 concatenated 6-byte frames, one per port:
+//
+//	55 5A 00 <portMask> <state(0|1)> <cksum>
+//
+// Must be called with u.mu held and u.connected == true.
+func (u *USBSlim) queryAllPorts() error {
+	frame := buildFrame(cmdQuery, 0x0F, 0x00)
+	if _, err := u.conn.Write(frame); err != nil {
+		return fmt.Errorf("queryAllPorts write: %w", err)
+	}
+	// Read up to 4×6 = 24 bytes (one 6-byte frame per port).
+	buf := make([]byte, 24)
+	total := 0
+	for total < len(buf) {
+		n, err := u.conn.Read(buf[total:])
+		total += n
+		if err != nil {
+			break // timeout or short read – parse whatever arrived
+		}
+		if n == 0 {
+			break
+		}
+	}
+	// Parse each 6-byte frame: 55 5A 00 <mask> <val> <cksum>
+	for i := 0; i+5 < total; i += 6 {
+		if buf[i] != 0x55 || buf[i+1] != 0x5A || buf[i+2] != cmdQuery {
+			continue
+		}
+		mask := buf[i+3]
+		state := buf[i+4] != 0x00
+		for j, pm := range portMasks {
+			if mask == pm {
+				u.ports[j] = state
+				break
+			}
+		}
+	}
+	return nil
+}
 
 // ─── USBHub interface ─────────────────────────────────────────────────────────
 
@@ -178,7 +231,7 @@ func (u *USBSlim) SetPort(_ context.Context, port int, on bool) error {
 	if !u.connected {
 		return fmt.Errorf("usbslim %s: not connected", u.id)
 	}
-	mask := portMask[port-1]
+	mask := portMasks[port-1]
 	val := byte(0)
 	if on {
 		val = 0x01
