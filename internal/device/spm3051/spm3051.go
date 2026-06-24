@@ -24,9 +24,8 @@ import (
 	"sync"
 	"time"
 
-	"go.bug.st/serial"
-
 	"github.com/yuguorong/power_wing/internal/device"
+	"github.com/yuguorong/power_wing/internal/serialport"
 )
 
 const (
@@ -44,7 +43,7 @@ type SPM3051 struct {
 	baud int
 
 	mu        sync.Mutex
-	conn      serial.Port
+	conn      serialport.Port
 	connected bool
 
 	// cached set-points (seeded from device on connect via VOLT?, CURR?, etc.)
@@ -86,15 +85,9 @@ func (s *SPM3051) Connect() error {
 		_ = s.conn.Close()
 		s.conn = nil
 	}
-	mode := &serial.Mode{
-		BaudRate: s.baud,
-		DataBits: 8,
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
-	}
-	p, err := serial.Open(s.port, mode)
+	p, err := serialport.Open(s.port, serialport.Mode(s.baud))
 	if err != nil {
-		return fmt.Errorf("spm3051 %s: connect: %w", s.id, err)
+		return fmt.Errorf("spm3051 %s: %w", s.id, err)
 	}
 	if err := p.SetReadTimeout(readTimeout); err != nil {
 		p.Close()

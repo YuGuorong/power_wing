@@ -18,21 +18,28 @@ import (
 var (
 	once    sync.Once
 	mgrRef  *manager.Manager
+	hostRef string
 	portRef int
 )
 
+var iconData []byte
+
 // Run starts the system-tray event loop (blocking).  Should be called in a
 // dedicated goroutine.
-func Run(mgr *manager.Manager, port int) {
+func Run(mgr *manager.Manager, host string, port int, icon []byte) {
 	mgrRef = mgr
+	hostRef = host
 	portRef = port
+	iconData = icon
 	once.Do(func() {
 		systray.Run(onReady, onExit)
 	})
 }
 
 func onReady() {
-	// Provide a minimal icon – replace with a real ICO/PNG if available.
+	if len(iconData) > 0 {
+		systray.SetIcon(iconData)
+	}
 	systray.SetTitle("PowerWing")
 	systray.SetTooltip("PowerWing – Power Supply Controller")
 
@@ -51,7 +58,7 @@ func onReady() {
 		}
 	}()
 
-	url := fmt.Sprintf("http://127.0.0.1:%d", portRef)
+	url := fmt.Sprintf("http://%s:%d", hostRef, portRef)
 
 	for {
 		select {

@@ -23,9 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"go.bug.st/serial"
-
 	"github.com/yuguorong/power_wing/internal/device"
+	"github.com/yuguorong/power_wing/internal/serialport"
 )
 
 const (
@@ -44,7 +43,7 @@ type PDPocket struct {
 	baud int
 
 	mu        sync.Mutex
-	conn      serial.Port
+	conn      serialport.Port
 	connected bool
 
 	// cached set-points (updated by SetVoltage / SetCurrent; only queried on first poll)
@@ -56,9 +55,9 @@ type PDPocket struct {
 	temperature   float64
 
 	// poll bookkeeping
-	initDone    bool // set-point read-back done on first GetState after connect
-	pollCount   int  // incremented each GetState; used to throttle slow queries
-	commErrCnt  int  // consecutive I/O errors; disconnect only after threshold
+	initDone   bool // set-point read-back done on first GetState after connect
+	pollCount  int  // incremented each GetState; used to throttle slow queries
+	commErrCnt int  // consecutive I/O errors; disconnect only after threshold
 }
 
 // New creates a new PDPocket driver.  baud=0 uses 115200.
@@ -91,15 +90,9 @@ func (p *PDPocket) Connect() error {
 		_ = p.conn.Close()
 		p.conn = nil
 	}
-	mode := &serial.Mode{
-		BaudRate: p.baud,
-		DataBits: 8,
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
-	}
-	sp, err := serial.Open(p.port, mode)
+	sp, err := serialport.Open(p.port, serialport.Mode(p.baud))
 	if err != nil {
-		return fmt.Errorf("pd_pocket %s: connect: %w", p.id, err)
+		return fmt.Errorf("pd_pocket %s: %w", p.id, err)
 	}
 	if err := sp.SetReadTimeout(readTimeout); err != nil {
 		sp.Close()

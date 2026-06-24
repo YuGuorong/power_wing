@@ -91,6 +91,16 @@ func New(cfg *config.Config) *Manager {
 
 // Start connects to all configured devices and begins polling.
 func (m *Manager) Start() error {
+	return m.start(true)
+}
+
+// LazyStart registers all devices without auto-connecting (for MCP mode).
+// Devices will be connected on demand when send_command or reconnect_device is called.
+func (m *Manager) LazyStart() error {
+	return m.start(false)
+}
+
+func (m *Manager) start(autoConnect bool) error {
 	for _, dc := range m.cfg.Devices {
 		if !dc.Enabled {
 			continue
@@ -104,10 +114,14 @@ func (m *Manager) Start() error {
 		if dc.Name != "" {
 			m.renames[dc.ID] = dc.Name
 		}
-		if err := dev.Connect(); err != nil {
-			log.Printf("[manager] %s: connect failed (will retry): %v", dc.ID, err)
+		if autoConnect {
+			if err := dev.Connect(); err != nil {
+				log.Printf("[manager] %s: connect failed (will retry): %v", dc.ID, err)
+			} else {
+				log.Printf("[manager] %s: connected", dc.ID)
+			}
 		} else {
-			log.Printf("[manager] %s: connected", dc.ID)
+			log.Printf("[manager] %s: registered (lazy, will connect on demand)", dc.ID)
 		}
 	}
 
@@ -475,6 +489,16 @@ func (m *Manager) execCmd(req CmdRequest) error {
 	if !ok {
 		return fmt.Errorf("unknown device %q", req.DeviceID)
 	}
+
+	// Lazy-connect: if the device is registered but not connected, auto-connect now.
+	if !dev.IsConnected() && !m.manualDisconnect[req.DeviceID] {
+		log.Printf("[manager] %s: lazy-connecting before command %q", req.DeviceID, req.Command)
+		if err := dev.Connect(); err != nil {
+			return fmt.Errorf("lazy-connect %s: %w", req.DeviceID, err)
+		}
+		log.Printf("[manager] %s: lazy-connected", req.DeviceID)
+	}
+
 	ctx := context.Background()
 
 	switch req.Command {
