@@ -2,7 +2,7 @@
 //
 // Usage (GUI mode, default):
 //
-//	powerwing [--port 8765] [--no-browser] [--voice]
+//	powerwing [--host 0.0.0.0] [--port 8765] [--no-browser] [--voice]
 //
 // Usage (CLI mode – executes command then exits):
 //
@@ -14,6 +14,9 @@
 //	powerwing --device <id> --usb-port <1-4> --usb-state on|off
 //	powerwing --list-ports
 //	powerwing --list-devices
+//go:generate go run ./tools/genicon/main.go
+// On Windows, also run: goversioninfo -o rsrc_windows.syso
+
 package main
 
 import (
@@ -31,10 +34,10 @@ import (
 	"strings"
 	"syscall"
 
-	"go.bug.st/serial"
-
 	"github.com/yuguorong/power_wing/internal/config"
 	"github.com/yuguorong/power_wing/internal/manager"
+	"github.com/yuguorong/power_wing/internal/mcp"
+	"github.com/yuguorong/power_wing/internal/serialport"
 	"github.com/yuguorong/power_wing/internal/server"
 	"github.com/yuguorong/power_wing/internal/tray"
 	"github.com/yuguorong/power_wing/internal/voice"
@@ -45,9 +48,15 @@ var rawWebFS embed.FS
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
+	fHost := flag.String("host", "127.0.0.1", "HTTP server bind host; use 0.0.0.0 for network access")
 	fPort := flag.Int("port", 8765, "HTTP server port")
 	fNoBrowser := flag.Bool("no-browser", false, "Do not open browser on start")
 	fVoice := flag.Bool("voice", false, "Enable voice command (Windows only)")
+	fMCP := flag.Bool("mcp", false, "Enable MCP server for AI tool calling")
+	fMCPOnly := flag.Bool("mcp-only", false, "Run only MCP server (no web UI)")
+	fMCPTransport := flag.String("mcp-transport", "stdio", "MCP transport: stdio or tcp")
+	fMCPHost := flag.String("mcp-host", "0.0.0.0", "MCP TCP bind host; use 0.0.0.0 for network access")
+	fMCPPort := flag.Int("mcp-port", 9876, "MCP TCP server port")
 
 	// Device command flags
 	fDevice := flag.String("device", "", "Device ID for CLI control")
@@ -88,8 +97,16 @@ func main() {
 
 	// ── Initialise manager ───────────────────────────────────────────────────
 	mgr := manager.New(cfg)
-	if err := mgr.Start(); err != nil {
-		log.Fatalf("manager start: %v", err)
+	if *fMCPOnly || *fMCP {
+		// MCP mode: lazy start — register devices but don't auto-connect.
+		// Devices connect on-demand when AI calls send_command / reconnect_device.
+		if err := mgr.LazyStart(); err != nil {
+			log.Fatalf("manager lazy start: %v", err)
+		}
+	} else {
+		if err := mgr.Start(); err != nil {
+			log.Fatalf("manager start: %v", err)
+		}
 	}
 
 	// ── CLI device control mode ───────────────────────────────────────────────
@@ -103,28 +120,69 @@ func main() {
 		return
 	}
 
+	if *fMCPOnly || *fMCP {
+		mcpCtx, mcpCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+		switch *fMCPTransport {
+		case "tcp":
+			go func() {
+				if err := mcp.ServeTCP(mcpCtx, mgr, *fMCPHost, *fMCPPort); err != nil {
+					log.Printf("[mcp] TCP server stopped: %v", err)
+				}
+			}()
+			if *fMCPOnly {
+				// In mcp-only TCP mode, wait for signal to exit.
+				<-mcpCtx.Done()
+				mcpCancel()
+				mgr.Stop()
+				return
+			}
+		case "stdio":
+			if *fMCPOnly {
+				log.Println("[mcp] stdio server started (mcp-only mode)")
+				if err := mcp.New(mgr, os.Stdin, os.Stdout).Serve(mcpCtx); err != nil {
+					log.Printf("[mcp] stopped with error: %v", err)
+				}
+				mcpCancel()
+				mgr.Stop()
+				return
+			}
+			// stdio alongside web UI
+			go func() {
+				log.Println("[mcp] stdio server started")
+				if err := mcp.New(mgr, os.Stdin, os.Stdout).Serve(mcpCtx); err != nil {
+					log.Printf("[mcp] stopped with error: %v", err)
+				}
+			}()
+		default:
+			log.Fatalf("unknown mcp-transport %q; use stdio or tcp", *fMCPTransport)
+		}
+
+		// Don't cancel MCP context here; it stays alive until process shutdown.
+	}
+
 	// ── GUI / server mode ─────────────────────────────────────────────────────
 	webFS, err := fs.Sub(rawWebFS, "web")
 	if err != nil {
 		log.Fatalf("web assets: %v", err)
 	}
 
-	srv := server.New(mgr, *fPort, webFS)
+	srv := server.New(mgr, *fHost, *fPort, webFS)
 	go func() {
 		if err := srv.Start(); err != nil {
 			log.Fatalf("server: %v", err)
 		}
 	}()
 
-	url := fmt.Sprintf("http://127.0.0.1:%d", *fPort)
+	url := fmt.Sprintf("http://%s:%d", *fHost, *fPort)
 	if !*fNoBrowser {
 		openBrowser(url)
 	} else {
-		fmt.Println("PowerWing running at", url)
+		log.Println("PowerWing running at", url)
 	}
 
 	// System tray (Windows: real; others: no-op)
-	go tray.Run(mgr, *fPort)
+	go tray.Run(mgr, *fHost, *fPort, appIcon)
 
 	// Voice commands
 	if *fVoice {
@@ -192,7 +250,7 @@ func cliControl(mgr *manager.Manager, id string, volt, curr float64, outp string
 }
 
 func listPorts() {
-	ports, err := serial.GetPortsList()
+	ports, err := serialport.List()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return

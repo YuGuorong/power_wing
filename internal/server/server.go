@@ -26,10 +26,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"go.bug.st/serial"
 
 	"github.com/yuguorong/power_wing/internal/config"
 	"github.com/yuguorong/power_wing/internal/manager"
+	"github.com/yuguorong/power_wing/internal/serialport"
 )
 
 var upgrader = websocket.Upgrader{
@@ -41,6 +41,7 @@ var upgrader = websocket.Upgrader{
 // Server wraps the HTTP mux and owns WebSocket client connections.
 type Server struct {
 	mgr     *manager.Manager
+	host    string
 	port    int
 	webFS   fs.FS
 	mux     *http.ServeMux
@@ -52,9 +53,10 @@ type Server struct {
 
 // New creates a Server.  webFS is the embedded filesystem rooted at the web/
 // directory so that index.html is directly accessible.
-func New(mgr *manager.Manager, port int, webFS fs.FS) *Server {
+func New(mgr *manager.Manager, host string, port int, webFS fs.FS) *Server {
 	s := &Server{
 		mgr:     mgr,
+		host:    host,
 		port:    port,
 		webFS:   webFS,
 		clients: make(map[*wsClient]struct{}),
@@ -82,7 +84,7 @@ func (s *Server) routes() {
 
 // Start begins listening.  Blocks until the server is shut down.
 func (s *Server) Start() error {
-	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 	s.httpSrv = &http.Server{
 		Addr:         addr,
 		Handler:      s.mux,
@@ -345,7 +347,7 @@ func (s *Server) handleSerialPorts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	ports, err := serial.GetPortsList()
+	ports, err := serialport.List()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

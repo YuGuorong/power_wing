@@ -23,9 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"go.bug.st/serial"
-
 	"github.com/yuguorong/power_wing/internal/device"
+	"github.com/yuguorong/power_wing/internal/serialport"
 )
 
 const (
@@ -52,7 +51,7 @@ type USBSlim struct {
 	baud int
 
 	mu        sync.Mutex
-	conn      serial.Port
+	conn      serialport.Port
 	connected bool
 
 	// locally tracked state (hub echoes every sent frame as ACK)
@@ -92,13 +91,8 @@ func (u *USBSlim) Connect() error {
 	if u.connected {
 		return nil
 	}
-	mode := &serial.Mode{
-		BaudRate: u.baud,
-		DataBits: 8,
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
-	}
-	p, err := serial.Open(u.port, mode)
+	mode := serialport.Mode(u.baud)
+	p, err := serialport.Open(u.port, mode)
 	if err != nil {
 		return fmt.Errorf("usbslim %s: connect: %w", u.id, err)
 	}
