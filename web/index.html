@@ -57,6 +57,7 @@
               <option value="spm3051">SPM3051 (UART)</option>
               <option value="pd_pocket">PD Pocket (UART)</option>
               <option value="usbslim">USB-Slim Hub (UART)</option>
+              <option value="usbalarm">USB Alarm Light (Modbus)</option>
             </select>
           </label>
           <label>Port
@@ -67,6 +68,7 @@
           </label>
           <label>Baud rate
             <select id="df-baud">
+              <option value="4800">4800</option>
               <option value="9600">9600</option>
               <option value="115200" selected>115200</option>
               <option value="57600">57600</option>
@@ -253,6 +255,167 @@
           <button class="btn-hub-ctrl" data-cmd="set_hwkeys" data-param="enabled" data-state="true">⌨ HW Keys ON</button>
           <button class="btn-hub-ctrl" data-cmd="set_autosave" data-param="enabled" data-state="false">💾 Auto-Save OFF</button>
         </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-alarm">
+  <div class="page" data-device-type="alarm_light">
+    <div class="hub-layout">
+      <!-- Port configuration – always visible at top -->
+      <div class="port-cfg-panel">
+        <div class="port-cfg-row">
+          <span class="device-name-label" title="Click to rename"></span>
+          <span class="conn-indicator" title="Disconnected"></span>
+          <span class="port-cfg-label">PORT</span>
+          <select class="port-cfg-select port-sel">
+            <option value="">— select —</option>
+          </select>
+          <span class="port-cfg-label">BPS</span>
+          <select class="port-cfg-select baud-sel">
+            <option value="4800" selected>4800</option>
+            <option value="9600">9600</option>
+            <option value="19200">19200</option>
+            <option value="57600">57600</option>
+            <option value="115200">115200</option>
+          </select>
+          <button class="btn-conn">Connect</button>
+        </div>
+      </div>
+
+      <div class="device-body">
+        <!-- Status indicator -->
+        <div class="alarm-status-row">
+          <div class="alarm-status">
+            <span class="alarm-status-label">Status:</span>
+            <span class="alarm-status-color" id="alarm-status-text">OFF</span>
+          </div>
+          <div class="alarm-indicator" id="alarm-indicator"></div>
+        </div>
+
+        <!-- Color grid -->
+        <div class="alarm-section">
+          <div class="set-label">COLOR</div>
+          <div class="alarm-color-grid">
+            <button class="alarm-color-btn" data-color="red" style="background:#ef4444;">RED</button>
+            <button class="alarm-color-btn" data-color="yellow" style="background:#eab308;">YEL</button>
+            <button class="alarm-color-btn" data-color="green" style="background:#22c55e;">GRN</button>
+            <button class="alarm-color-btn" data-color="white" style="background:#e2e8f0;color:#333;">WHT</button>
+            <button class="alarm-color-btn" data-color="cyan" style="background:#06b6d4;">CYN</button>
+            <button class="alarm-color-btn" data-color="purple" style="background:#a855f7;">PUR</button>
+            <button class="alarm-color-btn" data-color="blue" style="background:#3b82f6;">BLU</button>
+          </div>
+        </div>
+
+        <!-- Mode selector -->
+        <div class="alarm-section">
+          <div class="set-label">MODE</div>
+          <div class="alarm-mode-row">
+            <button class="alarm-mode-btn active" data-mode="on">ON</button>
+            <button class="alarm-mode-btn" data-mode="blink_slow">SLOW</button>
+            <button class="alarm-mode-btn" data-mode="blink_fast">FAST</button>
+          </div>
+        </div>
+
+        <!-- Animation crossfade -->
+        <div class="alarm-section">
+          <div class="set-label">ANIMATION</div>
+          <div class="alarm-anim-row">
+            <select class="alarm-anim-from" id="alarm-anim-from">
+              <option value="red">Red</option>
+              <option value="yellow">Yellow</option>
+              <option value="green">Green</option>
+              <option value="white">White</option>
+              <option value="cyan">Cyan</option>
+              <option value="purple">Purple</option>
+              <option value="blue">Blue</option>
+            </select>
+            <span class="anim-arrow">→</span>
+            <select class="alarm-anim-to" id="alarm-anim-to">
+              <option value="red">Red</option>
+              <option value="yellow" selected>Yellow</option>
+              <option value="green">Green</option>
+              <option value="white">White</option>
+              <option value="cyan">Cyan</option>
+              <option value="purple">Purple</option>
+              <option value="blue">Blue</option>
+            </select>
+            <input class="alarm-anim-dur" id="alarm-anim-dur" type="number" value="2000" min="50" max="30000" step="100">
+            <span class="spin-unit">ms</span>
+            <input class="alarm-anim-loop" id="alarm-anim-loop" type="number" value="-1" min="-1" max="999" step="1" title="-1=forever, 0/1=single, N=cycles">
+            <span class="spin-unit">loop</span>
+            <button class="btn-alarm-action" data-cmd="alarm_animate">🎬 Fade</button>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="alarm-section">
+          <div class="set-label">ACTIONS</div>
+          <div class="alarm-action-row">
+            <button class="btn-alarm-action" data-cmd="alarm_buzzer" data-param="on">🔊 Buzzer</button>
+            <button class="btn-alarm-action btn-danger" data-cmd="alarm_off">⏻ OFF</button>
+            <button class="btn-alarm-action" data-cmd="alarm_rainbow">🌈 Rainbow</button>
+          </div>
+        </div>
+
+        <!-- Beep row -->
+        <div class="alarm-section">
+          <div class="set-label">BEEP</div>
+          <div class="alarm-beep-row">
+            <select class="alarm-beep-color" id="alarm-beep-color">
+              <option value="red">Red</option>
+              <option value="yellow">Yellow</option>
+              <option value="green">Green</option>
+              <option value="white">White</option>
+              <option value="cyan">Cyan</option>
+              <option value="purple">Purple</option>
+              <option value="blue">Blue</option>
+            </select>
+            <input class="alarm-beep-ms" id="alarm-beep-ms" type="number" value="400" min="50" max="10000" step="50">
+            <span class="spin-unit">ms</span>
+            <button class="btn-alarm-action" data-cmd="alarm_beep">🔔 Beep</button>
+          </div>
+        </div>
+
+        <!-- PWM section (collapsible) -->
+        <details class="protection-section">
+          <summary>PWM RGB Control</summary>
+          <div class="alarm-pwm-row">
+            <div class="set-card">
+              <div class="set-label">RED PWM</div>
+              <div class="spinbox-row">
+                <div class="spinbox" data-cmd="alarm_pwm_r" data-min="0" data-max="1999" data-step="10" data-decimals="0">
+                  <input class="spin-input alarm-pwm-inp" type="number" step="10" min="0" max="1999" value="0" data-color="red">
+                </div>
+                <span class="spin-unit">/1999</span>
+              </div>
+            </div>
+            <div class="set-card">
+              <div class="set-label">GREEN PWM</div>
+              <div class="spinbox-row">
+                <div class="spinbox" data-cmd="alarm_pwm_g" data-min="0" data-max="1999" data-step="10" data-decimals="0">
+                  <input class="spin-input alarm-pwm-inp" type="number" step="10" min="0" max="1999" value="0" data-color="green">
+                </div>
+                <span class="spin-unit">/1999</span>
+              </div>
+            </div>
+            <div class="set-card">
+              <div class="set-label">BLUE PWM</div>
+              <div class="spinbox-row">
+                <div class="spinbox" data-cmd="alarm_pwm_b" data-min="0" data-max="1999" data-step="10" data-decimals="0">
+                  <input class="spin-input alarm-pwm-inp" type="number" step="10" min="0" max="1999" value="0" data-color="blue">
+                </div>
+                <span class="spin-unit">/1999</span>
+              </div>
+            </div>
+          </div>
+          <div class="alarm-pwm-extra">
+            <label>Flash (×100ms): <input id="alarm-pwm-flash" type="number" value="0" min="0" max="100"></label>
+            <label><input id="alarm-pwm-buzzer" type="checkbox"> Buzzer</label>
+            <button class="btn-alarm-action" data-cmd="alarm_pwm">Apply PWM</button>
+          </div>
+        </details>
       </div>
     </div>
   </div>

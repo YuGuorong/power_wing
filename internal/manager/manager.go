@@ -16,6 +16,7 @@ import (
 	"github.com/yuguorong/power_wing/internal/device"
 	"github.com/yuguorong/power_wing/internal/device/pdpocket"
 	"github.com/yuguorong/power_wing/internal/device/spm3051"
+	"github.com/yuguorong/power_wing/internal/device/usbalarm"
 	"github.com/yuguorong/power_wing/internal/device/usbslim"
 )
 
@@ -390,6 +391,8 @@ func (m *Manager) pollDevice(id string) {
 		st, err = d.GetState(ctx)
 	case device.USBHub:
 		st, err = d.GetState(ctx)
+	case device.AlarmLight:
+		st, err = d.GetState(ctx)
 	}
 	if err != nil {
 		log.Printf("[manager] pollDevice %s: %v", id, err)
@@ -427,6 +430,8 @@ func (m *Manager) pollAll() {
 		case device.PowerSupply:
 			state, err = d.GetState(ctx)
 		case device.USBHub:
+			state, err = d.GetState(ctx)
+		case device.AlarmLight:
 			state, err = d.GetState(ctx)
 		}
 		if err != nil {
@@ -627,6 +632,137 @@ func (m *Manager) execCmd(req CmdRequest) error {
 		}
 		return hub.SetAutoSave(ctx, enabled)
 
+	// ── alarm light ───────────────────────────────────────────────────────────
+	case "alarm_set_color":
+		al, ok := dev.(device.AlarmLight)
+		if !ok {
+			return fmt.Errorf("%s is not an alarm light", req.DeviceID)
+		}
+		color, err := stringParam(req.Params, "color")
+		if err != nil {
+			return err
+		}
+		mode, _ := optionalStringParam(req.Params, "mode")
+		if mode == "" {
+			mode = "on"
+		}
+		if mode == "animation" {
+			color2, err := stringParam(req.Params, "color2")
+			if err != nil {
+				return fmt.Errorf("animation requires color2: %w", err)
+			}
+			durationMs := 2000
+			if v, ok := req.Params["duration"]; ok {
+				switch n := v.(type) {
+				case float64:
+					durationMs = int(n)
+				case int:
+					durationMs = n
+				}
+			}
+			loop := -1
+			if v, ok := req.Params["loop"]; ok {
+				switch n := v.(type) {
+				case float64:
+					loop = int(n)
+				case int:
+					loop = n
+				}
+			}
+			go func() {
+				_ = al.Fade(ctx, color, color2, durationMs, loop)
+				m.pollDevice(req.DeviceID)
+			}()
+			return nil
+		}
+		if err := al.SetColor(ctx, color, mode); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "alarm_buzzer":
+		al, ok := dev.(device.AlarmLight)
+		if !ok {
+			return fmt.Errorf("%s is not an alarm light", req.DeviceID)
+		}
+		on, err := boolParam(req.Params, "on")
+		if err != nil {
+			return err
+		}
+		if err := al.Buzzer(ctx, on); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "alarm_off":
+		al, ok := dev.(device.AlarmLight)
+		if !ok {
+			return fmt.Errorf("%s is not an alarm light", req.DeviceID)
+		}
+		if err := al.Off(ctx); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "alarm_beep":
+		al, ok := dev.(device.AlarmLight)
+		if !ok {
+			return fmt.Errorf("%s is not an alarm light", req.DeviceID)
+		}
+		color, err := stringParam(req.Params, "color")
+		if err != nil {
+			return err
+		}
+		ms, err := intParam(req.Params, "ms")
+		if err != nil {
+			return err
+		}
+		// Beep is blocking (sleeps ms), run in background
+		go func() {
+			_ = al.Beep(ctx, color, ms)
+			m.pollDevice(req.DeviceID)
+		}()
+		return nil
+
+	case "alarm_pwm":
+		al, ok := dev.(device.AlarmLight)
+		if !ok {
+			return fmt.Errorf("%s is not an alarm light", req.DeviceID)
+		}
+		r, _ := intParamOptional(req.Params, "red")
+		g, _ := intParamOptional(req.Params, "green")
+		b, _ := intParamOptional(req.Params, "blue")
+		flash, _ := intParamOptional(req.Params, "flash_interval")
+		buzz, _ := boolParamOptional(req.Params, "buzzer")
+		if err := al.PWM(ctx, r, g, b, flash, buzz); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "alarm_rainbow":
+		al, ok := dev.(device.AlarmLight)
+		if !ok {
+			return fmt.Errorf("%s is not an alarm light", req.DeviceID)
+		}
+		durationMs := 2000
+		if v, ok := req.Params["duration"]; ok {
+			switch n := v.(type) {
+			case float64:
+				durationMs = int(n)
+			case int:
+				durationMs = n
+			}
+		}
+		go func() {
+			_ = al.Rainbow(ctx, durationMs)
+			m.pollDevice(req.DeviceID)
+		}()
+		return nil
+
 	default:
 		return fmt.Errorf("unknown command %q", req.Command)
 	}
@@ -642,6 +778,8 @@ func makeDevice(dc config.DeviceConfig) (device.Device, error) {
 		return pdpocket.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
 	case "usbslim":
 		return usbslim.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
+	case "usbalarm":
+		return usbalarm.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
 	default:
 		return nil, fmt.Errorf("unknown device type %q", dc.Type)
 	}
@@ -687,4 +825,48 @@ func intParam(p map[string]interface{}, key string) (int, error) {
 		return n, nil
 	}
 	return 0, fmt.Errorf("param %q is not an integer", key)
+}
+
+func stringParam(p map[string]interface{}, key string) (string, error) {
+	v, ok := p[key]
+	if !ok {
+		return "", fmt.Errorf("missing param %q", key)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("param %q must be a string", key)
+	}
+	return s, nil
+}
+
+func optionalStringParam(p map[string]interface{}, key string) (string, bool) {
+	v, ok := p[key]
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
+}
+
+func intParamOptional(p map[string]interface{}, key string) (int, bool) {
+	v, ok := p[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	}
+	return 0, false
+}
+
+func boolParamOptional(p map[string]interface{}, key string) (bool, bool) {
+	v, ok := p[key]
+	if !ok {
+		return false, false
+	}
+	b, ok := v.(bool)
+	return b, ok
 }
