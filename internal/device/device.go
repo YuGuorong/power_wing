@@ -61,18 +61,45 @@ type PowerState struct {
 type USBHub interface {
 	Device
 	GetState(ctx context.Context) (*HubState, error)
-	SetPort(ctx context.Context, port int, on bool) error       // port 1-4
-	SetLock(ctx context.Context, locked bool) error             // UI lock
-	SetHWKeys(ctx context.Context, enabled bool) error          // physical buttons
-	SetAutoSave(ctx context.Context, enabled bool) error        // auto-save state
-	SetDefaultOn(ctx context.Context, portMask byte) error      // default-ON mask
+	SetPort(ctx context.Context, port int, on bool) error  // port 1-4
+	SetLock(ctx context.Context, locked bool) error        // UI lock
+	SetHWKeys(ctx context.Context, enabled bool) error     // physical buttons
+	SetAutoSave(ctx context.Context, enabled bool) error   // auto-save state
+	SetDefaultOn(ctx context.Context, portMask byte) error // default-ON mask
 }
 
 // HubState carries everything the UI needs to render a USB hub page.
 type HubState struct {
 	Connected       bool    `json:"connected"`
-	Ports           [4]bool `json:"ports"`            // true = ON
+	Ports           [4]bool `json:"ports"` // true = ON
 	Locked          bool    `json:"locked"`
 	HWKeysEnabled   bool    `json:"hw_keys_enabled"`
 	AutoSaveEnabled bool    `json:"auto_save_enabled"`
+}
+
+// ─── USB alarm light ──────────────────────────────────────────────────────────
+
+// AlarmLight extends Device with 7-color alarm light controls over Modbus RTU.
+type AlarmLight interface {
+	Device
+	GetState(ctx context.Context) (*AlarmState, error)
+	SetColor(ctx context.Context, color string, mode string) error
+	Buzzer(ctx context.Context, on bool) error
+	Off(ctx context.Context) error
+	Beep(ctx context.Context, color string, ms int) error
+	PWM(ctx context.Context, red, green, blue int, flashInterval int, buzzer bool) error
+	Rainbow(ctx context.Context, durationMs int) error
+	Fade(ctx context.Context, colorFrom, colorTo string, durationMs int, loop int) error
+}
+
+// AlarmState carries everything the UI needs to render an alarm light page.
+type AlarmState struct {
+	Connected     bool   `json:"connected"`
+	Color         string `json:"color"` // red, yellow, green, white, cyan, purple, blue, off
+	Mode          string `json:"mode"`  // on, blink_slow, blink_fast, off
+	BuzzerOn      bool   `json:"buzzer_on"`
+	PWMR          int    `json:"pwm_r"`
+	PWMG          int    `json:"pwm_g"`
+	PWMB          int    `json:"pwm_b"`
+	FlashInterval int    `json:"flash_interval"`
 }

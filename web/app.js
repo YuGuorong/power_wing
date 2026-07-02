@@ -131,11 +131,16 @@ function activateTab(id) { toggleDevicePanel(id); }
 
 /** Returns true for any USB hub device type. */
 function isHub(type) { return type === 'usbslim' || type === 'usb_hub'; }
+/** Returns true for alarm light device type. */
+function isAlarm(type) { return type === 'usbalarm' || type === 'alarm_light'; }
 
 function ensureDevicePage(d) {
   if (document.getElementById(`page-${d.id}`)) return;
 
-  const tplId = isHub(d.type) ? 'tpl-hub' : 'tpl-psu';
+  let tplId = 'tpl-psu';
+  if (isHub(d.type)) tplId = 'tpl-hub';
+  else if (isAlarm(d.type)) tplId = 'tpl-alarm';
+
   const tpl = document.getElementById(tplId);
   if (!tpl) return;
 
@@ -145,6 +150,8 @@ function ensureDevicePage(d) {
 
   if (isHub(d.type)) {
     buildHubPage(clone, d);
+  } else if (isAlarm(d.type)) {
+    buildAlarmPage(clone, d);
   } else {
     buildPsuPage(clone, d);
   }
@@ -439,6 +446,139 @@ function updateHubPage(el, s, deviceId) {
   }
 }
 
+// ─── Alarm light page ─────────────────────────────────────────────────────────
+
+function buildAlarmPage(el, d) {
+  // Color buttons
+  $$('.alarm-color-btn', el).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const color = btn.dataset.color;
+      const modeBtn = $('.alarm-mode-btn.active', el);
+      const mode = modeBtn ? modeBtn.dataset.mode : 'on';
+      // Highlight selected color
+      $$('.alarm-color-btn', el).forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+      // Update indicator
+      const indicator = $('#alarm-indicator', el);
+      if (indicator) indicator.style.background = btn.style.background;
+      const status = $('#alarm-status-text', el);
+      if (status) { status.textContent = color.toUpperCase() + ' ' + mode.toUpperCase(); status.style.color = btn.style.background; }
+      sendCmd(d.id, 'alarm_set_color', { color, mode });
+    });
+  });
+
+  // Mode buttons
+  $$('.alarm-mode-btn', el).forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('.alarm-mode-btn', el).forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+  });
+
+  // Action buttons (buzzer, off, rainbow, beep, pwm)
+  $$('.btn-alarm-action', el).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cmd = btn.dataset.cmd;
+      if (cmd === 'alarm_buzzer') {
+        const cur = btn.dataset.state === 'true';
+        const next = !cur;
+        btn.dataset.state = String(next);
+        btn.textContent = next ? '🔊 Buzzer ON' : '🔊 Buzzer';
+        btn.classList.toggle('active', next);
+        sendCmd(d.id, cmd, { on: next });
+      } else if (cmd === 'alarm_off') {
+        // Reset UI
+        $$('.alarm-color-btn', el).forEach(b => b.classList.remove('selected'));
+        const indicator = $('#alarm-indicator', el);
+        if (indicator) indicator.style.background = '#333';
+        const status = $('#alarm-status-text', el);
+        if (status) { status.textContent = 'OFF'; status.style.color = '#888'; }
+        // Reset buzzer button
+        const buzBtn = $('.btn-alarm-action[data-cmd="alarm_buzzer"]', el);
+        if (buzBtn) { buzBtn.dataset.state = 'false'; buzBtn.textContent = '🔊 Buzzer'; buzBtn.classList.remove('active'); }
+        sendCmd(d.id, cmd, {});
+      } else if (cmd === 'alarm_rainbow') {
+        sendCmd(d.id, cmd, { duration: 2000 });
+      } else if (cmd === 'alarm_beep') {
+        const color = $('#alarm-beep-color', el)?.value || 'red';
+        const ms = parseInt($('#alarm-beep-ms', el)?.value, 10) || 400;
+        sendCmd(d.id, cmd, { color, ms });
+      } else if (cmd === 'alarm_pwm') {
+        const r = parseInt($('.alarm-pwm-inp[data-color="red"]', el)?.value, 10) || 0;
+        const g = parseInt($('.alarm-pwm-inp[data-color="green"]', el)?.value, 10) || 0;
+        const b = parseInt($('.alarm-pwm-inp[data-color="blue"]', el)?.value, 10) || 0;
+        const flash = parseInt($('#alarm-pwm-flash', el)?.value, 10) || 0;
+        const buzzer = $('#alarm-pwm-buzzer', el)?.checked || false;
+        sendCmd(d.id, cmd, { red: r, green: g, blue: b, flash_interval: flash, buzzer });
+      } else if (cmd === 'alarm_animate') {
+        const colorFrom = $('#alarm-anim-from', el)?.value || 'red';
+        const colorTo = $('#alarm-anim-to', el)?.value || 'yellow';
+        const duration = parseInt($('#alarm-anim-dur', el)?.value, 10) || 2000;
+        const loop = parseInt($('#alarm-anim-loop', el)?.value);
+        const params = { color: colorFrom, color2: colorTo, mode: 'animation', duration };
+        if (!isNaN(loop)) params.loop = loop;
+        sendCmd(d.id, 'alarm_set_color', params);
+      }
+    });
+  });
+
+  buildPortPanel(el, d);
+}
+
+function updateAlarmPage(el, s, deviceId) {
+  if (!s) return;
+  // Update status text
+  const status = $('#alarm-status-text', el);
+  if (status) {
+    if (s.color === 'off' || s.mode === 'off') {
+      status.textContent = 'OFF';
+      status.style.color = '#888';
+    } else if (s.color === 'pwm') {
+      status.textContent = `PWM R:${s.pwm_r} G:${s.pwm_g} B:${s.pwm_b}`;
+      status.style.color = '#f0a500';
+    } else {
+      status.textContent = s.color.toUpperCase() + ' ' + (s.mode || 'on').toUpperCase();
+      const colorMap = { red:'#ef4444', yellow:'#eab308', green:'#22c55e', white:'#e2e8f0', cyan:'#06b6d4', purple:'#a855f7', blue:'#3b82f6' };
+      status.style.color = colorMap[s.color] || '#fff';
+    }
+  }
+
+  // Update indicator
+  const indicator = $('#alarm-indicator', el);
+  if (indicator) {
+    if (s.color === 'off' || s.mode === 'off') {
+      indicator.style.background = '#333';
+      indicator.classList.remove('blinking');
+    } else {
+      const colorMap = { red:'#ef4444', yellow:'#eab308', green:'#22c55e', white:'#e2e8f0', cyan:'#06b6d4', purple:'#a855f7', blue:'#3b82f6' };
+      indicator.style.background = colorMap[s.color] || s.color || '#fff';
+      indicator.classList.toggle('blinking', s.mode === 'blink_slow' || s.mode === 'blink_fast');
+      if (s.mode === 'blink_fast') indicator.style.animationDuration = '0.3s';
+      else if (s.mode === 'blink_slow') indicator.style.animationDuration = '0.8s';
+    }
+  }
+
+  // Highlight active color button
+  if (s.color && s.color !== 'off' && s.color !== 'pwm') {
+    $$('.alarm-color-btn', el).forEach(b => {
+      b.classList.toggle('selected', b.dataset.color === s.color);
+    });
+  }
+
+  // Sync mode button
+  $$('.alarm-mode-btn', el).forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === s.mode);
+  });
+
+  // Sync buzzer button
+  const buzBtn = $('.btn-alarm-action[data-cmd="alarm_buzzer"]', el);
+  if (buzBtn) {
+    buzBtn.dataset.state = String(!!s.buzzer_on);
+    buzBtn.textContent = s.buzzer_on ? '🔊 Buzzer ON' : '🔊 Buzzer';
+    buzBtn.classList.toggle('active', !!s.buzzer_on);
+  }
+}
+
 // ─── Server message handler ────────────────────────────────────────────────────
 
 function handleServerMsg(msg) {
@@ -490,6 +630,8 @@ function updatePage(page, d, s) {
   debounce(`ui:${d.id}`, () => {
     if (isHub(d.type)) {
       updateHubPage(page, s, d.id);
+    } else if (isAlarm(d.type)) {
+      updateAlarmPage(page, s, d.id);
     } else {
       updatePsuPage(page, s);
     }
@@ -790,6 +932,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Scan ports
   document.getElementById('btn-scan-ports')?.addEventListener('click', scanPorts);
+
+  // Auto-select baud rate when device type changes
+  document.getElementById('df-type')?.addEventListener('change', () => {
+    const type = document.getElementById('df-type').value;
+    const baud = document.getElementById('df-baud');
+    if (type === 'usbalarm') baud.value = '4800';
+    else if (type === 'spm3051') baud.value = '115200';
+    else if (type === 'pd_pocket') baud.value = '115200';
+    else if (type === 'usbslim') baud.value = '9600';
+  });
 
   // Submit device form
   document.getElementById('device-form')?.addEventListener('submit', async (e) => {

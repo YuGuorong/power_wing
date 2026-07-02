@@ -429,7 +429,7 @@ func toolDefs() []map[string]interface{} {
 			"description": "Probe every serial port to find which one a device type responds on. Use this to discover where a device is physically connected.",
 			"inputSchema": schemaObject(
 				map[string]interface{}{
-					"device_type": schemaString("Device type: spm3051, pd_pocket, or usbslim."),
+					"device_type": schemaString("Device type: spm3051, pd_pocket, usbslim, or usbalarm."),
 				},
 				[]string{"device_type"},
 			),
@@ -554,7 +554,11 @@ func (s *Server) writeResponse(res rpcResponse) error {
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if _, err := fmt.Fprintf(s.out, "Content-Length: %d\n\n", len(data)); err != nil {
+	// Use \n (Unix LF) only — WSL /init bridge can split \r\n into separate
+	// chunks, causing asyncio readline clients to parse Content-Length\r as
+	// a broken header.  Pure \n avoids this pipe fragmentation issue.
+	header := fmt.Sprintf("Content-Length: %d\n\n", len(data))
+	if _, err := s.out.Write([]byte(header)); err != nil {
 		return err
 	}
 	_, err = s.out.Write(data)
@@ -576,7 +580,7 @@ func probeDevice(devType string, skipPorts map[string]bool) ([]map[string]interf
 
 	baud, probeCmd, respWait := probeParams(devType)
 	if probeCmd == nil {
-		return nil, fmt.Errorf("unsupported device type: %s (valid: spm3051, pd_pocket, usbslim)", devType)
+		return nil, fmt.Errorf("unsupported device type: %s (valid: spm3051, pd_pocket, usbslim, usbalarm)", devType)
 	}
 
 	var results []map[string]interface{}
@@ -611,6 +615,9 @@ func probeParams(devType string) (baud int, cmd []byte, wait time.Duration) {
 	case "usbslim":
 		// Query-all-ports frame: 55 5A 00 0F 00 0F
 		return 9600, []byte{0x55, 0x5A, 0x00, 0x0F, 0x00, 0x0F}, 300 * time.Millisecond
+	case "usbalarm":
+		// Send buzzer-off command as probe: 01 06 00 C2 00 41 + CRC
+		return 4800, []byte{0x01, 0x06, 0x00, 0xC2, 0x00, 0x41, 0xE8, 0x19}, 300 * time.Millisecond
 	default:
 		return 0, nil, 0
 	}

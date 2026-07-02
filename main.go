@@ -41,6 +41,8 @@ import (
 	"github.com/yuguorong/power_wing/internal/server"
 	"github.com/yuguorong/power_wing/internal/tray"
 	"github.com/yuguorong/power_wing/internal/voice"
+
+	"golang.org/x/sys/windows"
 )
 
 //go:embed web
@@ -48,7 +50,7 @@ var rawWebFS embed.FS
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
-	fHost := flag.String("host", "127.0.0.1", "HTTP server bind host; use 0.0.0.0 for network access")
+	fHost := flag.String("host", "0.0.0.0", "HTTP server bind host")
 	fPort := flag.Int("port", 8765, "HTTP server port")
 	fNoBrowser := flag.Bool("no-browser", false, "Do not open browser on start")
 	fVoice := flag.Bool("voice", false, "Enable voice command (Windows only)")
@@ -70,6 +72,7 @@ func main() {
 
 	// Info flags
 	fListPorts := flag.Bool("list-ports", false, "List available serial ports and exit")
+	fServer := flag.Bool("server", false, "Run as background server (spawn detached process, then CLI exits)")
 	fListDevices := flag.Bool("list-devices", false, "List configured devices and exit")
 
 	flag.Usage = func() {
@@ -77,6 +80,44 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	// ── Background server mode ────────────────────────────────────────────────
+	if *fServer {
+		exe, err := os.Executable()
+		if err != nil {
+			log.Fatalf("cannot find executable: %v", err)
+		}
+
+		// Build args: copy all flags except --server, and add --no-browser.
+		var args []string
+		for _, a := range os.Args[1:] {
+			if a == "--server" || a == "-server" {
+				continue
+			}
+			if strings.HasPrefix(a, "--server=") || strings.HasPrefix(a, "-server=") {
+				continue
+			}
+			args = append(args, a)
+		}
+		args = append(args, "--no-browser")
+
+		cmd := exec.Command(exe, args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+			HideWindow:    true,
+		}
+		cmd.Stdin = nil
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+
+		if err := cmd.Start(); err != nil {
+			log.Fatalf("failed to start background server: %v", err)
+		}
+		// Release the process handle so the child survives the parent exiting.
+		_ = cmd.Process.Release()
+		fmt.Printf("PowerWing server started in background (PID: %d)\n", cmd.Process.Pid)
+		return
+	}
 
 	// ── Load config ──────────────────────────────────────────────────────────
 	cfg, err := config.Load()
