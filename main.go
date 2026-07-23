@@ -14,6 +14,9 @@
 //	powerwing --device <id> --usb-port <1-4> --usb-state on|off
 //	powerwing --list-ports
 //	powerwing --list-devices
+//go:generate go run ./tools/genicon/main.go
+//go:generate goversioninfo -o rsrc_windows.syso
+
 package main
 
 import (
@@ -42,6 +45,9 @@ import (
 
 //go:embed web
 var rawWebFS embed.FS
+
+//go:embed app.ico
+var appIcon []byte
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
@@ -124,7 +130,7 @@ func main() {
 	}
 
 	// System tray (Windows: real; others: no-op)
-	go tray.Run(mgr, *fPort)
+	go tray.Run(mgr, *fPort, appIcon)
 
 	// Voice commands
 	if *fVoice {

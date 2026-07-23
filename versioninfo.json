@@ -1,0 +1,43 @@
+﻿{
+    "FixedFileInfo":  {
+                          "FileVersion":  {
+                                              "Major":  1,
+                                              "Minor":  0,
+                                              "Patch":  0,
+                                              "Build":  0
+                                          },
+                          "ProductVersion":  {
+                                                 "Major":  1,
+                                                 "Minor":  0,
+                                                 "Patch":  0,
+                                                 "Build":  0
+                                             },
+                          "FileFlagsMask":  "3f",
+                          "FileFlags":  "00",
+                          "FileOS":  "040004",
+                          "FileType":  "01",
+                          "FileSubType":  "00"
+                      },
+    "StringFileInfo":  {
+                           "Comments":  "",
+                           "CompanyName":  "",
+                           "FileDescription":  "PowerWing 鈥?Power Supply \u0026 USB Hub Controller",
+                           "FileVersion":  "1.0.0.0",
+                           "InternalName":  "power_wing",
+                           "LegalCopyright":  "",
+                           "LegalTrademarks":  "",
+                           "OriginalFilename":  "power_wing.exe",
+                           "PrivateBuild":  "",
+                           "ProductName":  "PowerWing",
+                           "ProductVersion":  "1.0.0.0",
+                           "SpecialBuild":  ""
+                       },
+    "VarFileInfo":  {
+                        "Translation":  {
+                                            "LangID":  "0409",
+                                            "CharsetID":  "04B0"
+                                        }
+                    },
+    "IconPath":  "app.ico",
+    "ManifestPath":  ""
+}

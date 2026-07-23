@@ -6,4 +6,4 @@ package tray
 import "github.com/yuguorong/power_wing/internal/manager"
 
 // Run is a no-op on Linux/macOS.
-func Run(_ *manager.Manager, _ int) {}
+func Run(_ *manager.Manager, _ int, _ []byte) {}
