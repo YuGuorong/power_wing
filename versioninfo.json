@@ -1,4 +1,4 @@
-﻿{
+{
     "FixedFileInfo":  {
                           "FileVersion":  {
                                               "Major":  1,
@@ -21,7 +21,7 @@
     "StringFileInfo":  {
                            "Comments":  "",
                            "CompanyName":  "",
-                           "FileDescription":  "PowerWing 鈥?Power Supply \u0026 USB Hub Controller",
+                           "FileDescription":  "PowerWing 閳?Power Supply \u0026 USB Hub Controller",
                            "FileVersion":  "1.0.0.0",
                            "InternalName":  "power_wing",
                            "LegalCopyright":  "",

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,21 @@ type CmdRequest struct {
 	Result   chan error
 }
 
+// cycleState tracks the runtime state of a port's cycle loop.
+type cycleState struct {
+	cancel context.CancelFunc
+	paused bool
+	phase  string  // "on", "off", "paused", ""
+	remain float64 // seconds remaining
+	total  float64 // total seconds for current phase (random set value)
+	mu     sync.Mutex
+}
+
+// cycleKey builds a unique key for a device + port.
+func cycleKey(id string, port int) string {
+	return fmt.Sprintf("%s:%d", id, port)
+}
+
 // ─── Manager ──────────────────────────────────────────────────────────────────
 
 // Manager owns all device instances and drives periodic polling.
@@ -67,6 +83,9 @@ type Manager struct {
 	// manualDisconnect holds IDs that the user explicitly disconnected.
 	// The auto-reconnect loop skips these until the user reconnects.
 	manualDisconnect map[string]bool
+
+	cycleMu   sync.Mutex
+	cycleState map[string]*cycleState // key: "id:port"
 
 	subsMu sync.Mutex
 	subs   []chan StateUpdate
@@ -84,6 +103,7 @@ func New(cfg *config.Config) *Manager {
 		states:           make(map[string]interface{}),
 		renames:          make(map[string]string),
 		manualDisconnect: make(map[string]bool),
+		cycleState:       make(map[string]*cycleState),
 		cmdCh:            make(chan CmdRequest, 32),
 		stopCh:           make(chan struct{}),
 	}
@@ -104,6 +124,13 @@ func (m *Manager) Start() error {
 		if dc.Name != "" {
 			m.renames[dc.ID] = dc.Name
 		}
+		// Start per-port cycle loops
+		dc.EnsureCycles()
+		for port := 0; port < dc.NumCyclePorts(); port++ {
+			if dc.Cycles[port].Enabled {
+				m.startCycleLocked(dc.ID, port)
+			}
+		}
 		if err := dev.Connect(); err != nil {
 			log.Printf("[manager] %s: connect failed (will retry): %v", dc.ID, err)
 		} else {
@@ -120,6 +147,7 @@ func (m *Manager) Start() error {
 // Stop signals all background goroutines and waits for them to finish.
 func (m *Manager) Stop() {
 	close(m.stopCh)
+	m.stopAllCycle()
 	m.wg.Wait()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -225,6 +253,8 @@ func (m *Manager) AddDevice(dc config.DeviceConfig) error {
 	if err != nil {
 		return err
 	}
+	// Ensure cycles are initialized.
+	dc.EnsureCycles()
 	if err := dev.Connect(); err != nil {
 		log.Printf("[manager] %s: connect failed (will retry): %v", dc.ID, err)
 	}
@@ -249,6 +279,7 @@ func (m *Manager) ReplaceConfig(newCfg *config.Config) error {
 // DisconnectDevice disconnects a device but keeps it registered so the UI
 // can still show it and the user can reconnect later.
 func (m *Manager) DisconnectDevice(id string) error {
+	m.stopAllDeviceCycle(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	dev, ok := m.devices[id]
@@ -312,6 +343,7 @@ func (m *Manager) ReconnectDevice(id, port string, baud int) error {
 
 // RemoveDevice disconnects and removes a device.
 func (m *Manager) RemoveDevice(id string) error {
+	m.stopAllDeviceCycle(id)
 	m.mu.Lock()
 	dev, ok := m.devices[id]
 	if ok {
@@ -322,6 +354,303 @@ func (m *Manager) RemoveDevice(id string) error {
 	m.mu.Unlock()
 	m.cfg.RemoveDevice(id)
 	return m.cfg.Save()
+}
+
+// ─── cycle control ─────────────────────────────────────────────────────────────
+
+// GetCycleConfig returns the cycle config for a device+port.
+// port=0 for PSU, 1-4 for hub.
+func (m *Manager) GetCycleConfig(id string, port int) (*config.CycleConfig, error) {
+	for _, d := range m.cfg.Devices {
+		if d.ID == id {
+			cc := d.GetCycle(port)
+			return &cc, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown device %q", id)
+}
+
+// SetCycleConfig updates the cycle config for a device+port and persists it.
+// port=0 for PSU, 1-4 for hub.
+func (m *Manager) SetCycleConfig(id string, port int, cc config.CycleConfig) error {
+	found := false
+	for i, d := range m.cfg.Devices {
+		if d.ID == id {
+			m.cfg.Devices[i].SetCycle(port, cc)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown device %q", id)
+	}
+	if err := m.cfg.Save(); err != nil {
+		return err
+	}
+	if cc.Enabled {
+		m.startCycle(id, port)
+	} else {
+		m.stopCycle(id, port)
+	}
+	go m.pollDevice(id)
+	return nil
+}
+
+func (m *Manager) startCycle(id string, port int) {
+	m.cycleMu.Lock()
+	defer m.cycleMu.Unlock()
+	m.startCycleLocked(id, port)
+}
+
+func (m *Manager) startCycleLocked(id string, port int) {
+	key := cycleKey(id, port)
+	if cs, ok := m.cycleState[key]; ok && cs.cancel != nil {
+		cs.cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cycleState[key] = &cycleState{cancel: cancel, paused: false, phase: "", remain: 0}
+	m.wg.Add(1)
+	go m.cycleLoop(ctx, id, port)
+	log.Printf("[manager] %s port %d: cycle started", id, port)
+}
+
+func (m *Manager) stopCycle(id string, port int) {
+	m.cycleMu.Lock()
+	defer m.cycleMu.Unlock()
+	key := cycleKey(id, port)
+	if cs, ok := m.cycleState[key]; ok {
+		cs.mu.Lock()
+		if cs.cancel != nil {
+			cs.cancel()
+			cs.cancel = nil
+		}
+		cs.phase = ""
+		cs.remain = 0
+		cs.mu.Unlock()
+		delete(m.cycleState, key)
+		log.Printf("[manager] %s port %d: cycle stopped", id, port)
+	}
+}
+
+// stopAllCycle cancels all running cycle loops.
+func (m *Manager) stopAllCycle() {
+	m.cycleMu.Lock()
+	defer m.cycleMu.Unlock()
+	for key, cs := range m.cycleState {
+		cs.mu.Lock()
+		if cs.cancel != nil {
+			cs.cancel()
+		}
+		cs.mu.Unlock()
+		delete(m.cycleState, key)
+	}
+}
+
+// stopAllDeviceCycle stops all cycle loops for a given device (all ports).
+func (m *Manager) stopAllDeviceCycle(id string) {
+	for port := 0; port < 4; port++ {
+		m.stopCycle(id, port)
+	}
+}
+
+// cycleLoop is the per-port goroutine that toggles output on/off at random
+// intervals within the configured duration ranges.
+// port=0 for PSU, 1-4 for hub port.
+func (m *Manager) cycleLoop(ctx context.Context, id string, port int) {
+	defer m.wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		key := cycleKey(id, port)
+		m.cycleMu.Lock()
+		cs, ok := m.cycleState[key]
+		m.cycleMu.Unlock()
+		if !ok {
+			return
+		}
+
+		cs.mu.Lock()
+		paused := cs.paused
+		cs.mu.Unlock()
+		if paused {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		cc, err := m.GetCycleConfig(id, port)
+		if err != nil || !cc.Enabled {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		// ── ON phase ────────────────────────────────────────────────────────
+		onDur := randomDur(cc.OnMin, cc.OnMax)
+		cs.mu.Lock()
+		cs.phase = "on"
+		cs.remain = onDur
+		cs.total = onDur
+		cs.mu.Unlock()
+
+		m.mu.RLock()
+		dev, devOk := m.devices[id]
+		m.mu.RUnlock()
+		if devOk {
+			m.setCyclePort(ctx, dev, port, true)
+			go m.pollDevice(id)
+		}
+
+		// Sleep with decrementing remain every 100ms
+		if !sleepDecrement(ctx, cs, onDur) {
+			return
+		}
+
+		// ── OFF phase ───────────────────────────────────────────────────────
+		offDur := randomDur(cc.OffMin, cc.OffMax)
+		cs.mu.Lock()
+		cs.phase = "off"
+		cs.remain = offDur
+		cs.total = offDur
+		cs.mu.Unlock()
+
+		if devOk {
+			m.setCyclePort(ctx, dev, port, false)
+			go m.pollDevice(id)
+		}
+
+		if !sleepDecrement(ctx, cs, offDur) {
+			return
+		}
+	}
+}
+
+// injectCycleState enriches a PowerState or HubState with cycle-switch status fields.
+func (m *Manager) injectCycleState(id string, st interface{}) interface{} {
+	switch v := st.(type) {
+	case *device.PowerState:
+		key := cycleKey(id, 0)
+		m.cycleMu.Lock()
+		cs, has := m.cycleState[key]
+		m.cycleMu.Unlock()
+		if has {
+			cs.mu.Lock()
+			v.CycleEnabled = true
+			if cs.paused {
+				v.CyclePhase = "paused"
+				v.CycleRemain = 0
+				v.CycleTotal = 0
+			} else {
+				v.CyclePhase = cs.phase
+				v.CycleRemain = cs.remain
+				v.CycleTotal = cs.total
+			}
+			cs.mu.Unlock()
+		} else {
+			v.CycleEnabled = false
+			v.CyclePhase = ""
+			v.CycleRemain = 0
+			v.CycleTotal = 0
+		}
+
+	case *device.HubState:
+		for port := 1; port <= 4; port++ {
+			key := cycleKey(id, port)
+			m.cycleMu.Lock()
+			cs, has := m.cycleState[key]
+			m.cycleMu.Unlock()
+			idx := port - 1
+			v.CyclePerPort[idx].Port = port
+			if has {
+				cs.mu.Lock()
+				v.CyclePerPort[idx].Enabled = true
+				if cs.paused {
+					v.CyclePerPort[idx].Phase = "paused"
+					v.CyclePerPort[idx].Remain = 0
+					v.CyclePerPort[idx].Total = 0
+				} else {
+					v.CyclePerPort[idx].Phase = cs.phase
+					v.CyclePerPort[idx].Remain = cs.remain
+					v.CyclePerPort[idx].Total = cs.total
+				}
+				cs.mu.Unlock()
+			} else {
+				v.CyclePerPort[idx].Enabled = false
+				v.CyclePerPort[idx].Phase = ""
+				v.CyclePerPort[idx].Remain = 0
+				v.CyclePerPort[idx].Total = 0
+			}
+		}
+	}
+	return st
+}
+
+// setCyclePort toggles a single port on/off. For PSU, port is ignored.
+func (m *Manager) setCyclePort(ctx context.Context, dev device.Device, port int, on bool) {
+	switch d := dev.(type) {
+	case device.PowerSupply:
+		_ = d.SetOutput(ctx, on)
+	case device.USBHub:
+		_ = d.SetPort(ctx, port, on)
+	}
+}
+
+// randomDur returns a random float in [min, max]. If min >= max, returns min.
+func randomDur(min, max float64) float64 {
+	if min >= max {
+		return min
+	}
+	return min + rand.Float64()*(max-min)
+}
+
+// waitCtx sleeps for d or returns false if ctx is cancelled.
+func waitCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// sleepDecrement sleeps for dur seconds while decrementing cs.remain every
+// tickInterval (100ms) so that polled state reflects the actual remaining time.
+// Returns false if the context was cancelled.
+func sleepDecrement(ctx context.Context, cs *cycleState, dur float64) bool {
+	const tickInterval = 100 * time.Millisecond
+	remaining := dur
+	for remaining > 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(tickInterval):
+			remaining -= float64(tickInterval) / float64(time.Second)
+			if remaining < 0 {
+				remaining = 0
+			}
+			cs.mu.Lock()
+			cs.remain = remaining
+			cs.mu.Unlock()
+		}
+	}
+	return true
+}
+
+// pauseCycle marks a port's cycle loop as paused.
+// For PSU, port is 0.
+func (m *Manager) pauseCycle(id string, port int) {
+	key := cycleKey(id, port)
+	m.cycleMu.Lock()
+	defer m.cycleMu.Unlock()
+	if cs, ok := m.cycleState[key]; ok {
+		cs.mu.Lock()
+		cs.paused = true
+		cs.phase = "paused"
+		cs.remain = 0
+		cs.mu.Unlock()
+	}
 }
 
 // ─── background loops ─────────────────────────────────────────────────────────
@@ -381,6 +710,7 @@ func (m *Manager) pollDevice(id string) {
 		log.Printf("[manager] pollDevice %s: %v", id, err)
 		return
 	}
+	st = m.injectCycleState(id, st)
 	m.mu.Lock()
 	m.states[id] = st
 	m.mu.Unlock()
@@ -419,6 +749,7 @@ func (m *Manager) pollAll() {
 			log.Printf("[manager] poll %s: %v", dev.ID(), err)
 			continue
 		}
+		state = m.injectCycleState(dev.ID(), state)
 		m.mu.Lock()
 		m.states[dev.ID()] = state
 		m.mu.Unlock()
@@ -521,6 +852,7 @@ func (m *Manager) execCmd(req CmdRequest) error {
 		if err := psu.SetOutput(ctx, on); err != nil {
 			return err
 		}
+		m.pauseCycle(req.DeviceID, 0)
 		go m.pollDevice(req.DeviceID)
 		return nil
 
@@ -568,6 +900,7 @@ func (m *Manager) execCmd(req CmdRequest) error {
 		if err != nil {
 			return err
 		}
+		m.pauseCycle(req.DeviceID, port)
 		return hub.SetPort(ctx, port, on)
 
 	case "set_lock":

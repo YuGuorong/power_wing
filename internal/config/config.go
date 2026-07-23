@@ -6,14 +6,77 @@ import (
 	"path/filepath"
 )
 
+// CycleConfig holds the cycle-switch settings for a power supply.
+type CycleConfig struct {
+	Enabled bool    `json:"enabled"`
+	OnMin   float64 `json:"on_min"`
+	OnMax   float64 `json:"on_max"`
+	OffMin  float64 `json:"off_min"`
+	OffMax  float64 `json:"off_max"`
+}
+
 // DeviceConfig holds configuration for a single device.
 type DeviceConfig struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Type    string `json:"type"` // "spm3051", "pd_pocket", "usbslim"
-	Port    string `json:"port"` // e.g. "COM3" or "/dev/ttyUSB0"
-	Baud    int    `json:"baud"` // 0 = use driver default
-	Enabled bool   `json:"enabled"`
+	ID      string        `json:"id"`
+	Name    string        `json:"name"`
+	Type    string        `json:"type"` // "spm3051", "pd_pocket", "usbslim"
+	Port    string        `json:"port"` // e.g. "COM3" or "/dev/ttyUSB0"
+	Baud    int           `json:"baud"` // 0 = use driver default
+	Enabled bool          `json:"enabled"`
+	Cycles  []CycleConfig `json:"cycles,omitempty"`
+}
+
+// NumCyclePorts returns how many cycle ports this device has.
+// 1 for power supply, 4 for USB hub.
+func (d *DeviceConfig) NumCyclePorts() int {
+	switch d.Type {
+	case "usbslim":
+		return 4
+	default:
+		return 1
+	}
+}
+
+// GetCycle returns the cycle config for a specific port (0 for PSU, 1-4 for hub).
+// Returns DefaultCycle() if the port's config is not yet initialized.
+func (d *DeviceConfig) GetCycle(port int) CycleConfig {
+	if port < 0 || len(d.Cycles) == 0 || port >= len(d.Cycles) {
+		return DefaultCycle()
+	}
+	cc := d.Cycles[port]
+	if cc.OnMin == 0 && cc.OnMax == 0 && cc.OffMin == 0 && cc.OffMax == 0 {
+		def := DefaultCycle()
+		cc.Enabled = def.Enabled
+		cc.OnMin = def.OnMin
+		cc.OnMax = def.OnMax
+		cc.OffMin = def.OffMin
+		cc.OffMax = def.OffMax
+	}
+	return cc
+}
+
+// SetCycle sets the cycle config for a specific port.
+func (d *DeviceConfig) SetCycle(port int, cc CycleConfig) {
+	d.EnsureCycles()
+	if port >= 0 && port < len(d.Cycles) {
+		d.Cycles[port] = cc
+	}
+}
+
+// EnsureCycles initializes the Cycles slice with defaults if nil or too short.
+func (d *DeviceConfig) EnsureCycles() {
+	n := d.NumCyclePorts()
+	if len(d.Cycles) < n {
+		old := d.Cycles
+		d.Cycles = make([]CycleConfig, n)
+		for i := range d.Cycles {
+			if i < len(old) {
+				d.Cycles[i] = old[i]
+			} else {
+				d.Cycles[i] = DefaultCycle()
+			}
+		}
+	}
 }
 
 // Config is the application-level configuration.
@@ -30,6 +93,17 @@ func Default() *Config {
 		Devices:      []DeviceConfig{},
 		ServerPort:   8765,
 		VoiceEnabled: false,
+	}
+}
+
+// DefaultCycle returns default cycle-switch settings.
+func DefaultCycle() CycleConfig {
+	return CycleConfig{
+		Enabled: false,
+		OnMin:   1.0,
+		OnMax:   3.0,
+		OffMin:  1.0,
+		OffMax:  3.0,
 	}
 }
 
