@@ -282,6 +282,8 @@ function buildPsuPage(el, d) {
     }, { passive: false });
   });
 
+  buildCyclePanel(el, d);
+  loadCycleConfig(d.id, el);
   buildPortPanel(el, d);
 }
 
@@ -333,6 +335,9 @@ function updatePsuPage(el, s) {
   setSpinboxIfIdle($('.spinbox[data-cmd="set_curr"]', el), s.curr_set, 2);
   setSpinboxIfIdle($('.spinbox[data-cmd="set_ovp"]',  el), s.ovp_limit, 2);
   setSpinboxIfIdle($('.spinbox[data-cmd="set_ocp"]',  el), s.ocp_limit, 2);
+
+  // Cycle phase status
+  updateCyclePhase(el, s);
 }
 
 /** Recalculate and push --fill-pct so the bar gradient shows the correct fill. */
@@ -362,6 +367,278 @@ function setSpinboxIfIdle(box, value, dec) {
       updateBarFill(bar);
     }
   }
+}
+
+// ─── Cycle panel ────────────────────────────────────────────────────────────────
+
+// ─── Hub per-port cycle panels ────────────────────────────────────────────────
+
+const CYCLE_MIN = 0;
+const CYCLE_MAX = 3600;
+const CYCLE_STEP = 1;
+
+const _cycleEditing = new Map();
+
+function disableCycleInputs(panel, disabled) {
+  $$('.cycle-input', panel).forEach(inp => inp.disabled = disabled);
+  $$('.cycle-spin', panel).forEach(btn => btn.disabled = disabled);
+  $$('.cycle-spinbox', panel).forEach(box => box.classList.toggle('disabled', disabled));
+}
+
+function buildHubCyclePanels(el, d) {
+  const container = $('.hub-cycle-ports', el);
+  if (!container) return;
+  container.innerHTML = '';
+  for (let port = 1; port <= 4; port++) {
+    const panel = document.createElement('div');
+    panel.className = 'cycle-port-panel';
+    panel.id = `${d.id}-cycle-port-${port}`;
+    panel.innerHTML = `
+      <div class="cycle-mode-header">
+        <span class="cycle-mode-arrow">&#9660;</span>
+        <span class="cycle-mode-title">CYCLE MODE</span>
+      </div>
+      <div class="cycle-mode-body">
+        <div class="cycle-port-title">PORT ${port}</div>
+        <div class="cycle-port-toggle-wrap">
+          <button class="toggle-sw hub-cycle-toggle" role="switch" aria-checked="false">
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+        <div class="cycle-status-box">
+          <div class="cycle-status-phase" id="${d.id}-cphase-${port}">OFF</div>
+          <div class="cycle-status-time" id="${d.id}-ctime-${port}">&nbsp;</div>
+        </div>
+        <div class="cycle-divider">ON Limit</div>
+        <div class="cycle-spin-group">
+          <div class="cycle-spin-label">min</div>
+          <div class="cycle-spinbox">
+            <button class="cycle-spin cycle-spin-down" data-series="on" data-bound="min">&minus;</button>
+            <input type="number" class="cycle-input" data-series="on" data-bound="min" value="1"
+              min="${CYCLE_MIN}" max="${CYCLE_MAX}" step="${CYCLE_STEP}">
+            <button class="cycle-spin cycle-spin-up" data-series="on" data-bound="min">+</button>
+          </div>
+        </div>
+        <div class="cycle-spin-group">
+          <div class="cycle-spin-label">max</div>
+          <div class="cycle-spinbox">
+            <button class="cycle-spin cycle-spin-down" data-series="on" data-bound="max">&minus;</button>
+            <input type="number" class="cycle-input" data-series="on" data-bound="max" value="3"
+              min="${CYCLE_MIN}" max="${CYCLE_MAX}" step="${CYCLE_STEP}">
+            <button class="cycle-spin cycle-spin-up" data-series="on" data-bound="max">+</button>
+          </div>
+        </div>
+        <div class="cycle-divider">OFF Limit</div>
+        <div class="cycle-spin-group">
+          <div class="cycle-spin-label">min</div>
+          <div class="cycle-spinbox">
+            <button class="cycle-spin cycle-spin-down" data-series="off" data-bound="min">&minus;</button>
+            <input type="number" class="cycle-input" data-series="off" data-bound="min" value="1"
+              min="${CYCLE_MIN}" max="${CYCLE_MAX}" step="${CYCLE_STEP}">
+            <button class="cycle-spin cycle-spin-up" data-series="off" data-bound="min">+</button>
+          </div>
+        </div>
+        <div class="cycle-spin-group">
+          <div class="cycle-spin-label">max</div>
+          <div class="cycle-spinbox">
+            <button class="cycle-spin cycle-spin-down" data-series="off" data-bound="max">&minus;</button>
+            <input type="number" class="cycle-input" data-series="off" data-bound="max" value="3"
+              min="${CYCLE_MIN}" max="${CYCLE_MAX}" step="${CYCLE_STEP}">
+            <button class="cycle-spin cycle-spin-up" data-series="off" data-bound="max">+</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const editKey = `${d.id}:${port}`;
+
+    // ── Collapse toggle on CYCLE MODE header ──────────────────────────────
+    const header = $('.cycle-mode-header', panel);
+    const body = $('.cycle-mode-body', panel);
+    header.addEventListener('click', () => {
+      body.classList.toggle('collapsed');
+      const arrow = $('.cycle-mode-arrow', header);
+      if (arrow) arrow.innerHTML = body.classList.contains('collapsed') ? '&#9654;' : '&#9660;';
+    });
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+    const readV = (series, bound) => parseInt($(`.cycle-input[data-series="${series}"][data-bound="${bound}"]`, panel)?.value) || 0;
+
+    const syncEnabled = () => {
+      const on = toggle.getAttribute('aria-checked') === 'true';
+      disableCycleInputs(panel, on);
+    };
+
+    const clampVals = (onMin, onMax, offMin, offMax) => {
+      if (onMin > onMax) onMin = onMax;
+      if (onMax < onMin) onMax = onMin;
+      if (offMin > offMax) offMin = offMax;
+      if (offMax < offMin) offMax = offMin;
+      return { onMin, onMax, offMin, offMax };
+    };
+
+    const save = () => {
+      let onMin = readV('on', 'min'), onMax = readV('on', 'max');
+      let offMin = readV('off', 'min'), offMax = readV('off', 'max');
+      const clamped = clampVals(onMin, onMax, offMin, offMax);
+      // Write clamped values back to inputs
+      const si = (s, b, v) => { const el = $(`.cycle-input[data-series="${s}"][data-bound="${b}"]`, panel); if (el) el.value = String(v); };
+      si('on', 'min', clamped.onMin); si('on', 'max', clamped.onMax);
+      si('off', 'min', clamped.offMin); si('off', 'max', clamped.offMax);
+      const enabled = toggle.getAttribute('aria-checked') === 'true';
+      fetch(`/api/device/${d.id}/cycle?port=${port}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, on_min: clamped.onMin, on_max: clamped.onMax, off_min: clamped.offMin, off_max: clamped.offMax }),
+      }).catch(e => console.warn('[cycle] save failed:', e));
+    };
+
+    const spin = (inp, dir) => {
+      const step = parseFloat(inp.step) || CYCLE_STEP;
+      const minL = parseFloat(inp.min) || CYCLE_MIN;
+      const maxL = parseFloat(inp.max) || CYCLE_MAX;
+      const series = inp.dataset.series;
+      const bound = inp.dataset.bound;
+      let v = (parseFloat(inp.value) || 0) + dir * step;
+      v = Math.round(v);
+      v = Math.max(minL, Math.min(maxL, v));
+      if (bound === 'min') {
+        const peer = readV(series, 'max');
+        if (v > peer) v = peer;
+      } else {
+        const peer = readV(series, 'min');
+        if (v < peer) v = peer;
+      }
+      inp.value = String(v);
+      _cycleEditing.set(editKey, true);
+      save();
+      setTimeout(() => _cycleEditing.set(editKey, false), 500);
+    };
+
+    // ── Toggle: when ON → disable inputs, OFF → enable ────────────────────
+    const toggle = $('.hub-cycle-toggle', panel);
+    toggle.addEventListener('click', () => {
+      const on = toggle.getAttribute('aria-checked') !== 'true';
+      toggle.setAttribute('aria-checked', String(on));
+      syncEnabled();
+      save();
+    });
+
+    // ── Spin buttons ──────────────────────────────────────────────────────
+    $$('.cycle-spin', panel).forEach(btn => {
+      btn.addEventListener('click', () => {
+        const inp = $('.cycle-input', btn.closest('.cycle-spinbox'));
+        if (!inp) return;
+        spin(inp, btn.classList.contains('cycle-spin-up') ? 1 : -1);
+      });
+    });
+
+    // ── Direct input ──────────────────────────────────────────────────────
+    $$('.cycle-input', panel).forEach(inp => {
+      inp.addEventListener('focus', () => _cycleEditing.set(editKey, true));
+      inp.addEventListener('blur', () => {
+        let v = parseInt(inp.value, 10);
+        if (isNaN(v) || v < CYCLE_MIN) v = CYCLE_MIN;
+        if (v > CYCLE_MAX) v = CYCLE_MAX;
+        // Enforce min ≤ max peer constraint
+        const bound = inp.dataset.bound;
+        const series = inp.dataset.series;
+        if (bound === 'min') {
+          const peer = readV(series, 'max');
+          if (v > peer) v = peer;
+        } else {
+          const peer = readV(series, 'min');
+          if (v < peer) v = peer;
+        }
+        inp.value = String(v);
+        _cycleEditing.set(editKey, false);
+        save();
+      });
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
+      inp.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        spin(inp, e.deltaY < 0 ? 1 : -1);
+      }, { passive: false });
+    });
+
+    container.appendChild(panel);
+    syncEnabled();
+  }
+
+  for (let port = 1; port <= 4; port++) {
+    loadPortCycleConfig(d.id, port);
+  }
+}
+
+async function doSaveCycle(deviceId, port, panel) {
+  const toggle = $('.hub-cycle-toggle', panel);
+  const enabled = toggle.getAttribute('aria-checked') === 'true';
+  const read = (s, b) => parseInt($(`.cycle-input[data-series="${s}"][data-bound="${b}"]`, panel)?.value) || 0;
+  const body = { enabled, on_min: read('on','min'), on_max: read('on','max'), off_min: read('off','min'), off_max: read('off','max') };
+  try {
+    await fetch(`/api/device/${deviceId}/cycle?port=${port}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) { console.warn('[cycle] save failed:', e); }
+}
+
+async function loadPortCycleConfig(deviceId, port) {
+  try {
+    const resp = await fetch(`/api/device/${deviceId}/cycle?port=${port}`);
+    if (!resp.ok) return;
+    applyPortCycleConfig(deviceId, port, await resp.json());
+  } catch (_) {}
+}
+
+function applyPortCycleConfig(deviceId, port, cc) {
+  const panel = document.getElementById(`${deviceId}-cycle-port-${port}`);
+  if (!panel) return;
+  const editKey = `${deviceId}:${port}`;
+  if (_cycleEditing.get(editKey)) { updatePortStatus(deviceId, port, cc); return; }
+
+  const toggle = $('.hub-cycle-toggle', panel);
+  if (toggle) toggle.setAttribute('aria-checked', String(!!cc.enabled));
+
+  const setInput = (series, bound, v) => {
+    const inp = $(`.cycle-input[data-series="${series}"][data-bound="${bound}"]`, panel);
+    if (inp && document.activeElement !== inp && v != null) inp.value = String(Math.round(v));
+  };
+  setInput('on', 'min', cc.on_min);
+  setInput('on', 'max', cc.on_max);
+  setInput('off', 'min', cc.off_min);
+  setInput('off', 'max', cc.off_max);
+
+  disableCycleInputs(panel, !!cc.enabled);
+  updatePortStatus(deviceId, port, cc);
+}
+
+function updatePortStatus(deviceId, port, cc) {
+  const phaseEl = document.getElementById(`${deviceId}-cphase-${port}`);
+  const timeEl  = document.getElementById(`${deviceId}-ctime-${port}`);
+  if (!phaseEl) return;
+  if (cc && cc.enabled && cc.phase) {
+    const r = cc.remain != null ? cc.remain.toFixed(1) : '—';
+    const t = cc.total != null && cc.total > 0 ? cc.total.toFixed(1) : '—';
+    if (cc.phase === 'paused') {
+      phaseEl.textContent = '⏸ PAUSED';
+      if (timeEl) timeEl.innerHTML = '&nbsp;';
+    } else {
+      phaseEl.textContent = cc.phase === 'on' ? 'ON' : 'OFF';
+      if (timeEl) timeEl.textContent = `${r}/${t}`;
+    }
+  } else if (cc && cc.enabled) {
+    phaseEl.textContent = 'ON';
+    if (timeEl) timeEl.innerHTML = '&nbsp;';
+  } else {
+    phaseEl.textContent = 'OFF';
+    if (timeEl) timeEl.innerHTML = '&nbsp;';
+  }
+}
+
+function updateHubCyclePhase(el, s) {
+  if (!s || !s.cycle_per_port) return;
+  s.cycle_per_port.forEach(pp => applyPortCycleConfig(el.dataset.deviceId, pp.port, pp));
 }
 
 // ─── USB Hub page ──────────────────────────────────────────────────────────────
@@ -403,6 +680,7 @@ function buildHubPage(el, d) {
     });
   });
 
+  buildHubCyclePanels(el, d);
   buildPortPanel(el, d);
 }
 
@@ -437,6 +715,9 @@ function updateHubPage(el, s, deviceId) {
     asBtn.textContent = s.auto_save_enabled ? '💾 Auto-Save ON' : '💾 Auto-Save OFF';
     asBtn.classList.toggle('active', s.auto_save_enabled);
   }
+
+  // Cycle phase status
+  updateHubCyclePhase(el, s);
 }
 
 // ─── Server message handler ────────────────────────────────────────────────────

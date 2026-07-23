@@ -53,6 +53,11 @@ type PowerState struct {
 	// Optional extras
 	Temperature float64 `json:"temperature,omitempty"`
 	InputVolt   float64 `json:"input_volt,omitempty"`
+	// Cycle switch status (filled by manager, not driver)
+	CycleEnabled bool    `json:"cycle_enabled,omitempty"`
+	CyclePhase   string  `json:"cycle_phase,omitempty"` // "on" / "off" / "paused" / ""
+	CycleRemain  float64 `json:"cycle_remain,omitempty"` // seconds remaining in current phase
+	CycleTotal   float64 `json:"cycle_total,omitempty"`  // total seconds of current phase
 }
 
 // ─── USB hub ──────────────────────────────────────────────────────────────────
@@ -68,11 +73,21 @@ type USBHub interface {
 	SetDefaultOn(ctx context.Context, portMask byte) error      // default-ON mask
 }
 
+// PerPortCycle carries cycle status for one USB hub port.
+type PerPortCycle struct {
+	Port    int     `json:"port"`
+	Enabled bool    `json:"enabled"`
+	Phase   string  `json:"phase"`  // "on" / "off" / "paused" / ""
+	Remain  float64 `json:"remain"` // seconds remaining in current phase
+	Total   float64 `json:"total"`  // total seconds of current phase (random set value)
+}
+
 // HubState carries everything the UI needs to render a USB hub page.
 type HubState struct {
-	Connected       bool    `json:"connected"`
-	Ports           [4]bool `json:"ports"`            // true = ON
-	Locked          bool    `json:"locked"`
-	HWKeysEnabled   bool    `json:"hw_keys_enabled"`
-	AutoSaveEnabled bool    `json:"auto_save_enabled"`
+	Connected       bool           `json:"connected"`
+	Ports           [4]bool        `json:"ports"` // true = ON
+	Locked          bool           `json:"locked"`
+	HWKeysEnabled   bool           `json:"hw_keys_enabled"`
+	AutoSaveEnabled bool           `json:"auto_save_enabled"`
+	CyclePerPort    [4]PerPortCycle `json:"cycle_per_port,omitempty"`
 }

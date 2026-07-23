@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,15 @@ import (
 	"github.com/yuguorong/power_wing/internal/config"
 	"github.com/yuguorong/power_wing/internal/manager"
 )
+
+// cycleConfigJSON is the JSON shape for cycle config over the wire.
+type cycleConfigJSON struct {
+	Enabled bool    `json:"enabled"`
+	OnMin   float64 `json:"on_min"`
+	OnMax   float64 `json:"on_max"`
+	OffMin  float64 `json:"off_min"`
+	OffMax  float64 `json:"off_max"`
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true }, // localhost only
@@ -82,7 +92,7 @@ func (s *Server) routes() {
 
 // Start begins listening.  Blocks until the server is shut down.
 func (s *Server) Start() error {
-	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	addr := fmt.Sprintf("0.0.0.0:%d", s.port)
 	s.httpSrv = &http.Server{
 		Addr:         addr,
 		Handler:      s.mux,
@@ -241,10 +251,10 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
-	// /api/device/{id}/state  or  /api/device/{id}/cmd
+	// /api/device/{id}/{action}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/device/"), "/")
 	if len(parts) < 2 {
-		writeError(w, http.StatusBadRequest, "path: /api/device/{id}/{state|cmd}")
+		writeError(w, http.StatusBadRequest, "path: /api/device/{id}/{action}")
 		return
 	}
 	id, action := parts[0], parts[1]
@@ -335,10 +345,64 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]string{"status": "ok"})
 
+	case "cycle":
+		s.handleCycle(w, r, id)
+
 	default:
 		writeError(w, http.StatusNotFound, "unknown action")
 	}
 }
+
+func (s *Server) handleCycle(w http.ResponseWriter, r *http.Request, id string) {
+	// Parse port from query string (default 0 for PSU).
+	port := 0
+	if p := r.URL.Query().Get("port"); p != "" {
+		port, _ = strconv.Atoi(p)
+	}
+	if port < 0 || port > 4 {
+		writeError(w, http.StatusBadRequest, "port must be 0-4")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		cc, err := s.mgr.GetCycleConfig(id, port)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, cc)
+
+	case http.MethodPut:
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "cannot read body")
+			return
+		}
+		var cc cycleConfigJSON
+		if err := json.Unmarshal(body, &cc); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		cfg := config.CycleConfig{
+			Enabled: cc.Enabled,
+			OnMin:   cc.OnMin,
+			OnMax:   cc.OnMax,
+			OffMin:  cc.OffMin,
+			OffMax:  cc.OffMax,
+		}
+		if err := s.mgr.SetCycleConfig(id, port, cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "GET or PUT only")
+	}
+}
+
+
 
 func (s *Server) handleSerialPorts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
