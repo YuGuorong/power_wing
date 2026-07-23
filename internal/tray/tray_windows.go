@@ -21,18 +21,23 @@ var (
 	portRef int
 )
 
+var iconData []byte
+
 // Run starts the system-tray event loop (blocking).  Should be called in a
 // dedicated goroutine.
-func Run(mgr *manager.Manager, port int) {
+func Run(mgr *manager.Manager, port int, icon []byte) {
 	mgrRef = mgr
 	portRef = port
+	iconData = icon
 	once.Do(func() {
 		systray.Run(onReady, onExit)
 	})
 }
 
 func onReady() {
-	// Provide a minimal icon – replace with a real ICO/PNG if available.
+	if len(iconData) > 0 {
+		systray.SetIcon(iconData)
+	}
 	systray.SetTitle("PowerWing")
 	systray.SetTooltip("PowerWing – Power Supply Controller")
 
