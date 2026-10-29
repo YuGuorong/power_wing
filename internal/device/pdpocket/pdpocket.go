@@ -90,7 +90,7 @@ func (p *PDPocket) Connect() error {
 		_ = p.conn.Close()
 		p.conn = nil
 	}
-	sp, err := serialport.Open(p.port, serialport.Mode(p.baud))
+	sp, err := serialport.OpenFor(p.id, p.port, serialport.Mode(p.baud))
 	if err != nil {
 		return fmt.Errorf("pd_pocket %s: %w", p.id, err)
 	}

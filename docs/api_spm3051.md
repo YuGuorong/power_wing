@@ -108,7 +108,9 @@ curl http://localhost:8765/api/device/psu1/state
   "output_on":      true,
   "ovp_triggered":  false,
   "ocp_triggered":  false,
-  "cv_mode":        true
+  "otp_triggered":  false,
+  "cv_mode":        true,
+  "remote_control": true
 }
 ```
 
@@ -125,7 +127,9 @@ curl http://localhost:8765/api/device/psu1/state
 | `output_on`      | bool   | Output enable state                        |
 | `ovp_triggered`  | bool   | OVP has been triggered                     |
 | `ocp_triggered`  | bool   | OCP has been triggered                     |
+| `otp_triggered`  | bool   | Over-temperature protection tripped        |
 | `cv_mode`        | bool   | `true` = CV mode, `false` = CC mode        |
+| `remote_control` | bool   | `true` while the PC holds front-panel control (keys/knob locked) |
 
 ---
 
@@ -234,6 +238,26 @@ curl -X POST http://localhost:8765/api/device/psu1/cmd \
 
 ---
 
+### release_control — Release Front-Panel Control
+
+Hands the physical keys/knob back to the operator **without disconnecting**.
+Polling and measurements continue; the next `set_volt`, `set_curr`,
+`set_outp`, `set_ovp` or `set_ocp` command re-takes control automatically.
+
+No parameters.
+
+```bash
+curl -X POST http://localhost:8765/api/device/psu1/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"command":"release_control","params":{}}'
+```
+
+Only devices that support local/remote switching accept this command
+(currently `spm3051`; others return an error).  The web UI shows a
+**Release panel** button while `remote_control` is `true`.
+
+---
+
 ## Lifecycle Endpoints
 
 ### Reconnect Device
@@ -323,7 +347,19 @@ powerwing --device psu1 --ocp 1.5
 
 ## Notes
 
-- SPM3051 enters **remote-control mode** (`SYSTem:REMote`) automatically on connect.
-- On connect, all set-points (voltage, current, OVP, OCP, output state) are queried from the device and cached.
-- State is polled every 1 second via `MEASure:ALL:INFO?` which returns: `V,A,W,OVP_trig,OCP_trig,x,mode`.
-- After 3 consecutive communication errors, the device is auto-disconnected and will retry reconnect every 5 seconds.
+- **The front panel is only locked while the app is actually controlling the PSU.**
+  Connecting and polling run in **local mode** and never lock it.  On connect the
+  driver reads `*IDN?` and all set-points, then sends `SYSTem:LOCal`.  Remote
+  mode is temporary: `SYSTem:REMote` is sent just before a set command and
+  `SYSTem:LOCal` again after 2 s without one, on `release_control`, and on
+  disconnect (the command is drained to the device before the port closes).
+  The next set command re-enters remote mode automatically.
+- Measurements keep updating while the PSU is in local mode; front-panel changes
+  to the output state or set-points are picked up by the poll loop.
+- State is polled every 1 second via `MEASure:ALL:INFO?`, which returns
+  `V,A,W,OVP_trig,OCP_trig,OTP_trig,mode` (mode: `0` standby, `1` CV, `2` CC,
+  `3` fault).  `OUTP?` is polled on every tick because output state is not part
+  of the MEAS reply; set-points are re-read every 5 ticks so changes made on
+  the front panel show up in the UI.
+- After 3 consecutive communication errors, the device is auto-disconnected
+  and retried every 5 seconds.

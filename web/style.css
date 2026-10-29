@@ -50,8 +50,29 @@ html, body {
   color: var(--accent);
   letter-spacing: 0.04em;
   white-space: nowrap;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: filter .15s, background .15s;
+}
+.topbar-brand:hover { filter: brightness(1.25); }
+.topbar-brand:active { filter: brightness(.95); }
+.topbar-brand:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 .brand-icon { width: 24px; height: 24px; color: var(--accent); }
+.brand-version {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1px 7px;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+.brand-version:empty { display: none; }
 
 .device-tabs {
   display: flex;
@@ -217,6 +238,14 @@ html, body {
   background: rgba(34,211,238,.15); color: var(--accent); letter-spacing: .1em;
 }
 .mode-badge.cc { background: rgba(167,139,250,.15); color: #a78bfa; }
+
+.btn-panel-release {
+  padding: 4px 9px; border-radius: 6px; font-size: 10px; white-space: nowrap;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); cursor: pointer;
+  transition: all .15s;
+}
+.btn-panel-release:hover { color: var(--text); border-color: var(--text-dim); }
 
 .temp-row { display: flex; gap: 4px; font-size: 12px; color: var(--text-dim); }
 .temp-value { color: var(--text); font-family: var(--digit-font); }
@@ -390,7 +419,25 @@ html, body {
 /* ── USB Hub page ─────────────────────────────────────────────────────────── */
 
 
-.ports-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.ports-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+
+/* 12-port hub: exactly 6 columns (2 rows), with slightly denser cards/toggles */
+.ports-row--12 { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.ports-row--12 .port-card {
+  padding: 14px 8px; gap: 10px; min-width: 0; border-radius: 10px;
+}
+.ports-row--12 .port-label { font-size: 12px; }
+.ports-row--12 .toggle-sw { width: 54px; height: 27px; border-radius: 14px; }
+.ports-row--12 .toggle-knob {
+  width: 18px; height: 18px; left: 3px;
+  top: 50%; transform: translateY(-50%);
+}
+.ports-row--12 .toggle-sw[aria-checked="true"] .toggle-knob { left: 29px; }
+.ports-row--12 .port-state { font-size: 10px; }
+
+@media (max-width: 640px) {
+  .ports-row--12 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 
 .port-card {
   background: var(--surface);
@@ -449,6 +496,25 @@ html, body {
   transition: color .2s;
 }
 .port-card.on .port-state { color: var(--on); }
+
+.hub-all-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.hub-all-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.btn-all-ports {
+  padding: 7px 16px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-dim); font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: all .15s;
+}
+.btn-all-ports[data-all="on"]:hover {
+  border-color: var(--on); color: var(--on); background: rgba(34,197,94,.1);
+}
+.btn-all-ports[data-all="off"]:hover {
+  border-color: var(--off); color: var(--off); background: rgba(239,68,68,.1);
+}
+.btn-all-ports:disabled { opacity: .5; cursor: default; }
 
 .hub-ctrl-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .btn-hub-ctrl {
@@ -510,6 +576,43 @@ html, body {
   border-radius: 20px; font-size: 12px; cursor: pointer; color: var(--text-dim);
 }
 .port-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+.settings-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── Serial port debug panel ──────────────────────────────────────────────── */
+.serial-log-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.serial-log-auto {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-dim); text-transform: none; letter-spacing: 0;
+}
+.serial-log-count {
+  margin-left: auto; font-size: 11px; color: var(--text-dim);
+  font-family: var(--digit-font);
+}
+.serial-log {
+  max-height: 320px; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.5;
+}
+.serial-log-row {
+  display: grid; grid-template-columns: 150px 64px minmax(0, 1fr);
+  gap: 8px; padding: 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+}
+.serial-log-row:last-child { border-bottom: none; }
+.serial-log-time { color: var(--text-dim); }
+.serial-log-action { font-weight: 700; letter-spacing: .04em; }
+.serial-log-action.open { color: var(--on); }
+.serial-log-action.open_failed { color: var(--off); }
+.serial-log-action.close { color: #fbbf24; }
+.serial-log-body { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.serial-log-owner { color: var(--accent); }
+.serial-log-caller { color: var(--text-dim); }
+.serial-log-error { color: #fca5a5; }
+.serial-log-empty { padding: 12px; color: var(--text-dim); }
 
 /* ── Common buttons ───────────────────────────────────────────────────────── */
 .btn-primary {
@@ -822,5 +925,164 @@ html, body {
   accent-color: var(--accent);
   width: 16px; height: 16px;
   cursor: pointer;
+}
+
+/* ── Power monitor (F-11) page ────────────────────────────────────────────── */
+.monitor-layout {
+  display: flex; flex-direction: column; gap: 16px; max-width: 860px;
+}
+.monitor-layout[data-connected="false"] .device-body {
+  opacity: 0.42;
+  pointer-events: none;
+  user-select: none;
+}
+
+.monitor-interval-badge {
+  display: flex; flex-direction: column; gap: 2px; align-items: center;
+}
+.interval-value {
+  font-family: var(--digit-font);
+  font-size: 15px; font-weight: 700;
+  color: var(--accent);
+}
+
+/* Expand / fold panel */
+.monitor-expand-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.monitor-expand-btn {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px;
+  background: transparent; border: none;
+  color: var(--text-dim); cursor: pointer;
+  font-size: 12px; text-transform: uppercase;
+  letter-spacing: .1em;
+  transition: color .15s, background .15s;
+}
+.monitor-expand-btn:hover { color: var(--text); background: var(--surface2); }
+.monitor-expand-btn .expand-arrow {
+  font-size: 10px;
+  transition: transform .2s;
+}
+.monitor-expand-btn[aria-expanded="true"] .expand-arrow {
+  transform: rotate(90deg);
+}
+.monitor-expand-btn[aria-expanded="true"] {
+  color: var(--accent);
+}
+.monitor-expand-body {
+  padding: 0 16px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+
+/* Average / peak stats */
+.monitor-stats-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 12px;
+}
+.monitor-stats-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.monitor-stat-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+.monitor-stat {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.monitor-stat-label {
+  font-size: 11px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.monitor-stat-value {
+  font-family: var(--digit-font);
+  font-size: 20px; font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+}
+.monitor-stat-value small {
+  font-size: 11px; color: var(--text-dim); font-weight: 600;
+}
+.avg-volt, .peak-volt { color: #4ade80; }
+.avg-curr, .peak-curr { color: #f87171; }
+
+/* Start / stop card */
+.monitor-start-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px;
+}
+.btn-monitor-start {
+  padding: 12px 28px;
+  border-radius: 8px;
+  border: 1px solid var(--on);
+  background: rgba(34,197,94,.12);
+  color: var(--on);
+  font-size: 14px; font-weight: 700;
+  cursor: pointer; transition: all .15s;
+  letter-spacing: .06em;
+  white-space: nowrap;
+}
+.btn-monitor-start:hover { filter: brightness(1.15); }
+.btn-monitor-start.running {
+  border-color: var(--warn);
+  background: rgba(245,158,11,.12);
+  color: var(--warn);
+}
+.monitor-count {
+  font-size: 12px; color: var(--text-dim);
+  font-family: var(--digit-font);
+}
+
+/* Chart card */
+.monitor-chart-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.monitor-chart-header {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px;
+}
+.monitor-chart-header .set-label { margin-bottom: 0; }
+.monitor-chart-controls {
+  display: flex; gap: 14px;
+}
+.chart-toggle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-dim);
+  cursor: pointer; user-select: none;
+  text-transform: none; letter-spacing: 0;
+}
+.chart-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px; height: 14px;
+  cursor: pointer;
+}
+.chart-swatch {
+  width: 14px; height: 3px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.chart-swatch--volt { background: #4ade80; }
+.chart-swatch--curr { background: #f87171; }
+.monitor-canvas {
+  width: 100%;
+  height: 200px;
+  display: block;
+  border-radius: 6px;
+  border: 1px solid var(--border);
 }
 

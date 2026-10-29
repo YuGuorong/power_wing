@@ -93,9 +93,13 @@ curl http://localhost:8765/api/device/hub1/state
 {
   "connected": true,
   "ports": [true, false, true, false],
+  "port_count": 4,
   "locked": false,
   "hw_keys_enabled": true,
-  "auto_save_enabled": false
+  "auto_save_enabled": false,
+  "supports_lock": true,
+  "supports_hw_keys": true,
+  "supports_auto_save": true
 }
 ```
 
@@ -103,9 +107,13 @@ curl http://localhost:8765/api/device/hub1/state
 |--------------------|-----------|------------------------------------------------|
 | `connected`        | bool      | Whether device is connected                    |
 | `ports`            | bool[4]   | Per-port ON/OFF state; index 0 = port 1        |
+| `port_count`       | int       | Number of switchable ports (4)                 |
 | `locked`           | bool      | UI lock state (`true` = locked)                |
 | `hw_keys_enabled`  | bool      | Physical button control (`true` = enabled)     |
 | `auto_save_enabled`| bool      | Auto-save state on power-off (`true` = enabled)|
+| `supports_lock`    | bool      | Driver supports the Lock control               |
+| `supports_hw_keys` | bool      | Driver supports hardware-key control           |
+| `supports_auto_save`| bool     | Driver supports auto-save control              |
 
 > `ports` is a 4-element array where `ports[0]` corresponds to physical port 1, `ports[1]` to port 2, etc.
 
@@ -152,6 +160,26 @@ curl -X POST http://localhost:8765/api/device/hub1/cmd \
 ```
 
 Underlying device command: binary frame `55 5A 01 <portMask> <0|1> <cksum>`.
+
+---
+
+### all-on / all-off — Switch Every Port
+
+```bash
+# All 4 ports ON
+curl -X POST http://localhost:8765/api/device/hub1/all-on
+
+# All 4 ports OFF
+curl -X POST http://localhost:8765/api/device/hub1/all-off
+```
+
+Generic command form:
+
+```json
+{"command":"set_all_usb_ports","params":{"on":true}}
+```
+
+Underlying device command: `55 5A 01 0F <0|1> <cksum>` (mask `0x0F`).
 
 ---
 

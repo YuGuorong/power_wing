@@ -1,5 +1,6 @@
-// Package mcp provides a minimal stdio Model Context Protocol server that
-// exposes PowerWing controls as MCP tools for AI clients.
+// Package mcp provides a minimal Model Context Protocol server that exposes
+// PowerWing controls as MCP tools for AI clients.  Transports: stdio, raw TCP,
+// and Streamable HTTP (see NewHTTP).
 package mcp
 
 import (
@@ -10,13 +11,16 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/yuguorong/power_wing/internal/config"
 	"github.com/yuguorong/power_wing/internal/manager"
 	"github.com/yuguorong/power_wing/internal/serialport"
+	"github.com/yuguorong/power_wing/internal/version"
 )
 
 const (
@@ -92,6 +96,71 @@ type rpcRequest struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
+// ─── Streamable HTTP transport ────────────────────────────────────────────────
+
+// NewHTTP returns an http.Handler exposing the MCP server via the Streamable
+// HTTP transport: each POST carries one JSON-RPC message and gets a plain
+// JSON response.  The handler is stateless (no session, no SSE stream), which
+// is spec-compliant — clients fall back to per-request POST round-trips.
+func NewHTTP(mgr *manager.Manager) http.Handler {
+	return &httpHandler{srv: &Server{mgr: mgr}}
+}
+
+type httpHandler struct {
+	srv *Server
+}
+
+func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Allow browser-based MCP clients on other origins.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id")
+
+	switch r.Method {
+	case http.MethodOptions:
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodPost:
+		h.handlePost(w, r)
+	default:
+		w.Header().Set("Allow", "POST, OPTIONS")
+		http.Error(w, "MCP endpoint: POST a JSON-RPC message (no SSE stream)", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *httpHandler) handlePost(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var req rpcRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSONRPC(w, rpcResponse{
+			JSONRPC: rpcVersion,
+			Error:   &rpcError{Code: -32700, Message: "parse error", Data: err.Error()},
+		})
+		return
+	}
+	res := h.srv.handleRequest(req)
+	if req.ID == nil {
+		// Notification (e.g. "notifications/initialized") — no response body.
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	writeJSONRPC(w, res)
+}
+
+func writeJSONRPC(w http.ResponseWriter, res rpcResponse) {
+	data, err := json.Marshal(res)
+	if err != nil {
+		http.Error(w, "marshal response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 type rpcResponse struct {
 	JSONRPC string      `json:"jsonrpc"`
 	ID      interface{} `json:"id,omitempty"`
@@ -162,7 +231,7 @@ func (s *Server) handleRequest(req rpcRequest) rpcResponse {
 			},
 			"serverInfo": map[string]string{
 				"name":    "power-wing",
-				"version": "1.0.0",
+				"version": version.Version,
 			},
 		}
 
@@ -314,14 +383,7 @@ func (s *Server) callTool(name string, args map[string]interface{}) (interface{}
 		if err != nil {
 			return nil, err
 		}
-		// Collect ports already configured in the manager to skip them
-		skipPorts := make(map[string]bool)
-		for _, d := range s.mgr.Devices() {
-			if d.Port != "" {
-				skipPorts[d.Port] = true
-			}
-		}
-		results, err := probeDevice(devType, skipPorts)
+		results, err := probeConfiguredDevices(s.mgr, devType)
 		if err != nil {
 			return nil, err
 		}
@@ -350,9 +412,111 @@ func (s *Server) callTool(name string, args map[string]interface{}) (interface{}
 			"voice_enabled": cfg.VoiceEnabled,
 		}, nil
 
+	case "powerwing_set_config":
+		return s.callSetConfig(args)
+
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// callSetConfig implements powerwing_set_config, the write counterpart of
+// powerwing_get_config.  Two mutually exclusive forms are accepted:
+//
+//   - devices: replace the whole configured device list.  Entries carry
+//     id/name/type/port/baud/enabled exactly as returned by get_config.
+//   - device_id (plus optional name/port/baud/enabled): update a single
+//     existing device.  Omitted fields keep their current values; port/baud
+//     changes rebuild and reconnect the device.
+func (s *Server) callSetConfig(args map[string]interface{}) (interface{}, error) {
+	rawDevs, hasDevs := args["devices"]
+	rawID, hasID := args["device_id"]
+	if hasDevs == hasID {
+		return nil, fmt.Errorf("provide either \"devices\" (full list) or \"device_id\" (single device), not both or neither")
+	}
+
+	if hasDevs {
+		list, ok := rawDevs.([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("devices must be an array of device objects")
+		}
+		devices := make([]config.DeviceConfig, 0, len(list))
+		for i, item := range list {
+			obj, ok := item.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("devices[%d] must be an object", i)
+			}
+			dc, err := deviceConfigFromArgs(obj)
+			if err != nil {
+				return nil, fmt.Errorf("devices[%d]: %w", i, err)
+			}
+			devices = append(devices, dc)
+		}
+		if err := s.mgr.SetConfig(devices); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"status": "ok", "updated": "all", "device_count": len(devices)}, nil
+	}
+
+	id, ok := rawID.(string)
+	if !ok {
+		return nil, fmt.Errorf("device_id must be a string")
+	}
+	name, _ := optionalStringArg(args, "name")
+	port, _ := optionalStringArg(args, "port")
+	baud, err := optionalIntArg(args, "baud")
+	if err != nil {
+		return nil, err
+	}
+	// enabled is tri-state: absent = keep current.
+	enabled, hasEnabled := parseOptionalBool(args["enabled"])
+	if hasEnabled {
+		// Verify the device exists and apply the enable flag before the
+		// connection update so the manager works on a known entry.
+		if err := s.mgr.SetDeviceEnabled(id, enabled); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.mgr.SetDeviceConfig(id, name, port, baud); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"status": "ok", "updated": id, "port": port, "baud": baud}, nil
+}
+
+// deviceConfigFromArgs converts a tool-argument object into a DeviceConfig.
+func deviceConfigFromArgs(obj map[string]interface{}) (config.DeviceConfig, error) {
+	var dc config.DeviceConfig
+	id, err := stringArg(obj, "id")
+	if err != nil {
+		return dc, err
+	}
+	dc.ID = id
+	if v, ok := optionalStringArg(obj, "name"); ok {
+		dc.Name = v
+	}
+	devType, err := stringArg(obj, "type")
+	if err != nil {
+		return dc, err
+	}
+	dc.Type = devType
+	if v, ok := optionalStringArg(obj, "port"); ok {
+		dc.Port = v
+	}
+	if v, err := optionalIntArg(obj, "baud"); err != nil {
+		return dc, err
+	} else if v > 0 {
+		dc.Baud = v
+	}
+	if b, ok := parseOptionalBool(obj["enabled"]); ok {
+		dc.Enabled = b
+	}
+	return dc, nil
+}
+
+// parseOptionalBool reads a JSON boolean that may be absent.
+func parseOptionalBool(v interface{}) (bool, bool) {
+	b, ok := v.(bool)
+	return b, ok
 }
 
 func toolDefs() []map[string]interface{} {
@@ -372,7 +536,7 @@ func toolDefs() []map[string]interface{} {
 		},
 		{
 			"name":        "powerwing_send_command",
-			"description": "Send a device command (for example set_volt, set_curr, set_outp, set_usb_port).",
+			"description": "Send a device command (for example set_volt, set_curr, set_outp, release_control, set_usb_port).",
 			"inputSchema": schemaObject(
 				map[string]interface{}{
 					"device_id": schemaString("Device ID."),
@@ -426,10 +590,10 @@ func toolDefs() []map[string]interface{} {
 		},
 		{
 			"name":        "powerwing_test_connection",
-			"description": "Probe every serial port to find which one a device type responds on. Use this to discover where a device is physically connected.",
+			"description": "Check whether configured devices of the given type are connected on their configured serial ports. Only configured ports are opened; host ports are enumerated for presence reporting only.",
 			"inputSchema": schemaObject(
 				map[string]interface{}{
-					"device_type": schemaString("Device type: spm3051, pd_pocket, usbslim, or usbalarm."),
+					"device_type": schemaString("Device type: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, or powerz."),
 				},
 				[]string{"device_type"},
 			),
@@ -438,6 +602,35 @@ func toolDefs() []map[string]interface{} {
 			"name":        "powerwing_get_config",
 			"description": "Return the full current configuration including all devices, server port, and feature flags.",
 			"inputSchema": schemaObject(nil, nil),
+		},
+		{
+			"name":        "powerwing_set_config",
+			"description": "Set configuration, the counterpart of powerwing_get_config. Two forms: (1) pass \"devices\" as the full device list (as returned by get_config) to replace all configuration; (2) pass \"device_id\" plus optional \"name\"/\"port\"/\"baud\"/\"enabled\" to update a single device, with omitted fields keeping current values. Combine with powerwing_list_serial_ports to assign ports: enumerate host ports, then configure which device uses which port.",
+			"inputSchema": schemaObject(
+				map[string]interface{}{
+					"devices": map[string]interface{}{
+						"type":        "array",
+						"description": "Full device list to replace the configuration (mutually exclusive with device_id).",
+						"items": schemaObject(
+							map[string]interface{}{
+								"id":      schemaString("Device ID, e.g. PSU1."),
+								"name":    schemaString("Display name."),
+								"type":    schemaString("Device type: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, or powerz."),
+								"port":    schemaString("Serial port from powerwing_list_serial_ports, e.g. COM3 or /dev/ttyUSB0."),
+								"baud":    map[string]interface{}{"type": "integer", "description": "Baud rate; 0 or omitted = driver default."},
+								"enabled": map[string]interface{}{"type": "boolean", "description": "Whether the device is enabled."},
+							},
+							[]string{"id", "type"},
+						),
+					},
+					"device_id": schemaString("Update a single existing device by ID (mutually exclusive with devices)."),
+					"name":      schemaString("New display name (single-device form; omit to keep)."),
+					"port":      schemaString("New serial port (single-device form; omit to keep)."),
+					"baud":      map[string]interface{}{"type": "integer", "description": "New baud rate (single-device form; omit or 0 to keep)."},
+					"enabled":   map[string]interface{}{"type": "boolean", "description": "Enable/disable flag (single-device form; omit to keep)."},
+				},
+				nil,
+			),
 		},
 	}
 }
@@ -565,39 +758,65 @@ func (s *Server) writeResponse(res rpcResponse) error {
 	return err
 }
 
-// probeDevice opens each serial port and tries a device-type-specific probe
-// command to see whether a compatible device is attached.  It returns the list
-// of ports where the device responded.  Ports in skipPorts are skipped (e.g.
-// they are already opened by the manager).
-func probeDevice(devType string, skipPorts map[string]bool) ([]map[string]interface{}, error) {
-	ports, err := serialport.List()
+// probeConfiguredDevices tests whether configured devices of the given type
+// are connected on their configured serial ports.  Host-wide enumeration is
+// used only to report whether each configured port exists — non-configured
+// ports are NEVER opened.  Ports of configured devices that are currently
+// connected (held by the manager) are reported from live state instead of
+// being probed, so the open handle is not disturbed.
+func probeConfiguredDevices(mgr *manager.Manager, devType string) ([]map[string]interface{}, error) {
+	baud, probeCmd, respWait := probeParams(devType)
+	if probeCmd == nil {
+		return nil, fmt.Errorf("unsupported device type: %s (valid: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz)", devType)
+	}
+
+	// Enumerate host ports (list only — nothing is opened here).
+	hostPorts, err := serialport.List()
 	if err != nil {
 		return nil, fmt.Errorf("list serial ports: %w", err)
 	}
-	if len(ports) == 0 {
-		return []map[string]interface{}{}, nil
+	exists := make(map[string]bool, len(hostPorts))
+	for _, p := range hostPorts {
+		exists[p] = true
 	}
 
-	baud, probeCmd, respWait := probeParams(devType)
-	if probeCmd == nil {
-		return nil, fmt.Errorf("unsupported device type: %s (valid: spm3051, pd_pocket, usbslim, usbalarm)", devType)
+	// Ports held live by the manager — probing them would disturb the open
+	// handle, so they are reported from live connection state instead.
+	live := make(map[string]bool)
+	for _, d := range mgr.Devices() {
+		if d.Connected {
+			live[d.Port] = true
+		}
 	}
 
 	var results []map[string]interface{}
-	for _, port := range ports {
-		if skipPorts[port] {
-			results = append(results, map[string]interface{}{
-				"port":    port,
-				"matched": false,
-				"skipped": true,
-				"reason":  "port already in use by a configured device",
-			})
+	for _, d := range mgr.Devices() {
+		if !strings.EqualFold(d.Type, devType) {
 			continue
 		}
-		found := probePort(port, baud, probeCmd, respWait)
 		entry := map[string]interface{}{
-			"port":    port,
-			"matched": found,
+			"device_id": d.ID,
+			"name":      d.Name,
+			"port":      d.Port,
+			"baud":      d.Baud,
+		}
+		switch {
+		case d.Port == "":
+			entry["matched"] = false
+			entry["reason"] = "device has no port configured"
+		case !exists[d.Port]:
+			entry["matched"] = false
+			entry["reason"] = "configured port is not present on the host"
+		case d.Connected:
+			// Manager already holds the port and confirmed the device.
+			entry["matched"] = true
+			entry["reason"] = "device is connected via manager"
+		case live[d.Port]:
+			// Port is open by another configured device of a different type.
+			entry["matched"] = false
+			entry["reason"] = "port is in use by another connected device"
+		default:
+			entry["matched"] = probePort("probe:"+devType, d.Port, baud, probeCmd, respWait)
 		}
 		results = append(results, entry)
 	}
@@ -615,36 +834,70 @@ func probeParams(devType string) (baud int, cmd []byte, wait time.Duration) {
 	case "usbslim":
 		// Query-all-ports frame: 55 5A 00 0F 00 0F
 		return 9600, []byte{0x55, 0x5A, 0x00, 0x0F, 0x00, 0x0F}, 300 * time.Millisecond
+	case "sangenxian":
+		// Device-ID query: 7E 85 E6 (4800-8-N-1, CRC8 poly 0x07).
+		return 4800, []byte{0x7E, 0x85, 0xE6}, 300 * time.Millisecond
 	case "usbalarm":
 		// Send buzzer-off command as probe: 01 06 00 C2 00 41 + CRC
 		return 4800, []byte{0x01, 0x06, 0x00, 0xC2, 0x00, 0x41, 0xE8, 0x19}, 300 * time.Millisecond
+	case "f11":
+		// F-11 (AFU IoT) meter: streams "current,voltage" lines and answers
+		// ASCII sys commands at 38400-8-N-1.  Probe with sys version.
+		return 38400, []byte("sys version\r\n"), 400 * time.Millisecond
+	case "powerz":
+		// POWER-Z (KM002C/KM003C) meter over its CDC port: Connect followed by
+		// GetData(ADC) = 02 00 00 00 0C 00 02 00.  The device answers with a
+		// PutData frame (0x41).  Baud rate is ignored by the device.
+		return 115200, []byte{0x02, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x02, 0x00}, 400 * time.Millisecond
 	default:
 		return 0, nil, 0
 	}
 }
 
-// probePort tries opening a serial port, sending a probe command, and reading
-// a response.  Returns true if any non-empty response was received.
-// The entire operation is bounded by a 3-second timeout to avoid hanging on
-// non-responsive virtual COM ports.
-func probePort(port string, baud int, cmd []byte, wait time.Duration) bool {
+// probePort opens one serial port — always a port from the configuration —
+// sends the probe command, and reads a response.  Returns true if any
+// non-empty response was received.  The entire operation is bounded by a
+// 3-second timeout; if the probe is stuck by then (e.g. a blocking driver
+// Open or a hung read), the port is force closed so the OS handle is never
+// leaked.
+func probePort(owner, port string, baud int, cmd []byte, wait time.Duration) bool {
 	type result struct {
 		found bool
 	}
 	ch := make(chan result, 1)
+
+	// mu guards the port handle so the timeout path can force a Close even
+	// while the probe goroutine is blocked inside Open/Read.
+	var mu sync.Mutex
+	var p serialport.Port
+	forceClose := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if p != nil {
+			_ = p.Close()
+			p = nil
+		}
+	}
+
 	go func() {
 		mode := serialport.Mode(baud)
-		p, err := serialport.Open(port, mode)
+		sp, err := serialport.OpenFor(owner, port, mode)
+		mu.Lock()
 		if err != nil {
+			mu.Unlock()
 			ch <- result{false}
 			return
 		}
-		defer p.Close()
+		p = sp
+		mu.Unlock()
+		defer forceClose()
 
-		// Discard any stale data in the buffer.
+		// Discard any stale data in the buffer.  Bounded: a continuously
+		// streaming port (e.g. a diag port spewing logs) would otherwise
+		// never hit the n==0 exit and the port would never be closed.
 		p.SetReadTimeout(50 * time.Millisecond)
 		dummy := make([]byte, 256)
-		for {
+		for i := 0; i < 8; i++ {
 			n, _ := p.Read(dummy)
 			if n == 0 {
 				break
@@ -673,6 +926,8 @@ func probePort(port string, baud int, cmd []byte, wait time.Duration) bool {
 	case r := <-ch:
 		return r.found
 	case <-time.After(3 * time.Second):
+		// Probe is stuck — force release the handle instead of abandoning it.
+		forceClose()
 		return false
 	}
 }

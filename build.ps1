@@ -41,14 +41,17 @@ $jsonText = $json | ConvertTo-Json -Depth 10
 
 # ── 3. Generate rsrc_windows.syso ────────────────────────────────────────────
 Write-Host "==> Generating rsrc_windows.syso (icon + version info)"
-& "$env:GOPATH\bin\goversioninfo.exe" -o rsrc_windows.syso
+$Gopath = if ($env:GOPATH) { $env:GOPATH } else { (go env GOPATH) }
+& "$Gopath\bin\goversioninfo.exe" -o rsrc_windows.syso
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ── 4. Build executable ──────────────────────────────────────────────────────
 Write-Host "==> Building $Output"
 $env:GOOS   = "windows"
 $env:GOARCH = "amd64"
-go build -trimpath -ldflags="-s -w" -o $Output .
+# -H windowsgui: double-clicking must not open a console window.  The app
+# attaches to an existing terminal's console at runtime for CLI use.
+go build -trimpath -ldflags="-s -w -H windowsgui -X github.com/yuguorong/power_wing/internal/version.Version=$Version" -o $Output .
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "==> Done: $Output"

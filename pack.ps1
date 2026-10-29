@@ -25,7 +25,7 @@ Write-Host "==> Building power_wing_linux_amd64 ($Version)"
 $env:GOOS   = "linux"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
-go build -trimpath -ldflags="-s -w" -o power_wing_linux_amd64 .
+go build -trimpath -ldflags="-s -w -X github.com/yuguorong/power_wing/internal/version.Version=$Version" -o power_wing_linux_amd64 .
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $env:GOOS = $null; $env:GOARCH = $null; $env:CGO_ENABLED = $null
 
@@ -59,9 +59,20 @@ PACKAGE CONTENTS
 
 QUICK START (Windows)
 ---------------------
-1. Run power_wing.exe from Command Prompt or PowerShell
+1. Double-click power_wing.exe (or run it from cmd/PowerShell)
+   - No console window: it runs in the system tray with the Web UI
    - Web UI opens automatically at http://127.0.0.1:8765
    - Config saved to: %AppData%\PowerWing\config.json
+   - Logs: %AppData%\PowerWing\power_wing.log
+   - Quit: right-click the tray icon -> Quit
+   - MCP is opt-in: double-click starts only the Web UI + tray. To run MCP
+     alongside them: --mcp=true --mcp-transport tcp --mcp-host 0.0.0.0
+     --mcp-port 9876 (do not use --mcp-only). No authentication; use
+     --mcp-host 127.0.0.1 for local-only access.
+   - Serial ports are NOT opened at startup. Click Connect on a device page
+     (or Connect All in Settings) when you need a device. Use --auto-connect
+     to open every enabled device at startup.
+   - Settings > Serial Port Debug shows every port open/close and its owner.
 
 2. Command-line control:
    power_wing.exe --list-ports
@@ -80,6 +91,8 @@ QUICK START (Linux / Ubuntu)
 1. Make executable and run:
    chmod +x power_wing_linux_amd64
    ./power_wing_linux_amd64 --no-browser &
+   (serial ports are opened only when you click Connect; add --auto-connect
+    to open all enabled devices at startup)
 
 2. Access Web UI:
    http://localhost:8765
@@ -124,9 +137,12 @@ MCP TOOLS AVAILABLE
 
 SUPPORTED HARDWARE
 ------------------
-- SPM3051        UART-based lab power supply (SCPI protocol)
-- PD_Pocket      UART-based programmable power supply (115200 baud)
-- USB-Slim       UART-based USB hub with per-port power control (9600 baud)
+- SPM3051          UART-based lab power supply (SCPI protocol)
+- PD_Pocket        UART-based programmable power supply (115200 baud)
+- USB-Slim         UART-based 4-port USB hub (9600 baud)
+- SanGenXian       UART-based 12-port USB hub (4800 baud)
+- USB Alarm Light  7-color Modbus RTU alarm light (4800 baud)
+- F-11             AFU IoT power monitor (38400 baud)
 
 CONFIGURATION
 -------------

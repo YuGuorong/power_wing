@@ -92,7 +92,7 @@ func (u *USBSlim) Connect() error {
 		return nil
 	}
 	mode := serialport.Mode(u.baud)
-	p, err := serialport.Open(u.port, mode)
+	p, err := serialport.OpenFor(u.id, u.port, mode)
 	if err != nil {
 		return fmt.Errorf("usbslim %s: connect: %w", u.id, err)
 	}
@@ -208,11 +208,15 @@ func (u *USBSlim) GetState(_ context.Context) (*device.HubState, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return &device.HubState{
-		Connected:       u.connected,
-		Ports:           u.ports,
-		Locked:          u.locked,
-		HWKeysEnabled:   u.hwKeysEnabled,
-		AutoSaveEnabled: u.autoSaveEnabled,
+		Connected:        u.connected,
+		Ports:            u.ports[:],
+		PortCount:        4,
+		Locked:           u.locked,
+		HWKeysEnabled:    u.hwKeysEnabled,
+		AutoSaveEnabled:  u.autoSaveEnabled,
+		SupportsLock:     true,
+		SupportsHWKeys:   true,
+		SupportsAutoSave: true,
 	}, nil
 }
 
@@ -234,6 +238,27 @@ func (u *USBSlim) SetPort(_ context.Context, port int, on bool) error {
 		return err
 	}
 	u.ports[port-1] = on
+	return nil
+}
+
+// SetAllPorts switches all four ports ON or OFF with a single frame
+// (mask 0x0F).
+func (u *USBSlim) SetAllPorts(_ context.Context, on bool) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !u.connected {
+		return fmt.Errorf("usbslim %s: not connected", u.id)
+	}
+	val := byte(0)
+	if on {
+		val = 0x01
+	}
+	if err := u.send(buildFrame(cmdPort, 0x0F, val)); err != nil {
+		return err
+	}
+	for i := range u.ports {
+		u.ports[i] = on
+	}
 	return nil
 }
 

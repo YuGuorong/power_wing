@@ -56,6 +56,13 @@ if [ "$TARGET_OS" = "windows" ]; then
 fi
 
 echo "==> Compiling"
-CGO_ENABLED=0 GOOS=${TARGET_OS} GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "${OUTPUT}" .
+LDFLAGS="-s -w -X github.com/yuguorong/power_wing/internal/version.Version=${VERSION}"
+# Windows: GUI subsystem so double-click never opens a console window.
+# The binary attaches to an existing console for CLI use at runtime.
+if [ "$TARGET_OS" = "windows" ]; then
+    LDFLAGS="${LDFLAGS} -H windowsgui"
+fi
+CGO_ENABLED=0 GOOS=${TARGET_OS} GOARCH=amd64 go build -trimpath \
+    -ldflags="${LDFLAGS}" -o "${OUTPUT}" .
 
 echo "==> Done: ${OUTPUT}"

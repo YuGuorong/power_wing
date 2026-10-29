@@ -175,7 +175,7 @@ func (u *USBAlarmLight) Connect() error {
 		u.conn = nil
 	}
 	mode := serialport.Mode(u.baud)
-	p, err := serialport.Open(u.port, mode)
+	p, err := serialport.OpenFor(u.id, u.port, mode)
 	if err != nil {
 		return fmt.Errorf("usbalarm %s: connect: %w", u.id, err)
 	}

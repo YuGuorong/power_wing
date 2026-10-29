@@ -72,6 +72,15 @@ function showDevices() {
   }
 }
 
+/** Return to the device overview (clicking the brand / leaving Settings). */
+function goHome() {
+  state.activeTab = null;
+  $$('.device-tab').forEach(t => t.classList.remove('active'));
+  showDevices();
+  document.getElementById('devices-container')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 // ─── Tab management ───────────────────────────────────────────────────────────
 
 function renderTabs() {
@@ -130,9 +139,11 @@ function activateTab(id) { toggleDevicePanel(id); }
 // ─── Page factory ─────────────────────────────────────────────────────────────
 
 /** Returns true for any USB hub device type. */
-function isHub(type) { return type === 'usbslim' || type === 'usb_hub'; }
+function isHub(type) { return type === 'usbslim' || type === 'sangenxian' || type === 'usb_hub'; }
 /** Returns true for alarm light device type. */
 function isAlarm(type) { return type === 'usbalarm' || type === 'alarm_light'; }
+/** Returns true for power monitor (F-11, POWER-Z) device types. */
+function isMonitor(type) { return type === 'f11' || type === 'powerz' || type === 'power_monitor'; }
 
 function ensureDevicePage(d) {
   if (document.getElementById(`page-${d.id}`)) return;
@@ -140,6 +151,7 @@ function ensureDevicePage(d) {
   let tplId = 'tpl-psu';
   if (isHub(d.type)) tplId = 'tpl-hub';
   else if (isAlarm(d.type)) tplId = 'tpl-alarm';
+  else if (isMonitor(d.type)) tplId = 'tpl-monitor';
 
   const tpl = document.getElementById(tplId);
   if (!tpl) return;
@@ -152,6 +164,8 @@ function ensureDevicePage(d) {
     buildHubPage(clone, d);
   } else if (isAlarm(d.type)) {
     buildAlarmPage(clone, d);
+  } else if (isMonitor(d.type)) {
+    buildMonitorPage(clone, d);
   } else {
     buildPsuPage(clone, d);
   }
@@ -172,6 +186,17 @@ function buildPsuPage(el, d) {
       const stEl = $('.output-state', outSw.closest('.output-sw-wrap'));
       if (stEl) { stEl.textContent = on ? 'ON' : 'OFF'; stEl.classList.toggle('on', on); }
       sendCmd(d.id, 'set_outp', { on });
+    });
+  }
+
+  // "Release panel": hand front-panel control back to the operator without
+  // disconnecting, so measurements keep updating.  The next set command
+  // re-takes control automatically.
+  const relBtn = $('[data-cmd="release_control"]', el);
+  if (relBtn) {
+    relBtn.addEventListener('click', () => {
+      relBtn.classList.add('hidden'); // reappears on the next poll if still locked
+      sendCmd(d.id, 'release_control', {});
     });
   }
 
@@ -331,6 +356,10 @@ function updatePsuPage(el, s) {
     badge.classList.toggle('cc', !s.cv_mode);
   }
 
+  // "Release panel" is only offered while this PC holds front-panel control.
+  const relBtn = $('[data-cmd="release_control"]', el);
+  if (relBtn) relBtn.classList.toggle('hidden', !s.remote_control);
+
   // Temperature
   const tEl = $('.temp-value', el);
   if (tEl) tEl.textContent = s.temperature > 0 ? `${s.temperature.toFixed(1)}°C` : '—';
@@ -373,9 +402,26 @@ function setSpinboxIfIdle(box, value, dec) {
 
 // ─── USB Hub page ──────────────────────────────────────────────────────────────
 
+/** Number of switchable ports for a hub device. */
+function hubPortCount(d) {
+  const n = Number(d?.state?.port_count);
+  if (Number.isFinite(n) && n > 0) return n;
+  return d?.type === 'sangenxian' ? 12 : 4;
+}
+
+/** Whether the hub exposes lock / hardware-key / auto-save controls. */
+function hubControlsSupported(d) {
+  const s = d?.state;
+  if (s) return !!(s.supports_lock || s.supports_hw_keys || s.supports_auto_save);
+  return d?.type !== 'sangenxian';
+}
+
 function buildHubPage(el, d) {
   const portsRow = $('.ports-row', el);
-  for (let i = 1; i <= 4; i++) {
+  const portCount = hubPortCount(d);
+  // 12-port hubs use a compact 2×6 grid; 4-port hubs keep their original layout.
+  portsRow.classList.toggle('ports-row--12', portCount === 12);
+  for (let i = 1; i <= portCount; i++) {
     const card = document.createElement('div');
     card.className = 'port-card';
     card.id = `${d.id}-port-${i}`;
@@ -398,6 +444,21 @@ function buildHubPage(el, d) {
     portsRow.appendChild(card);
   }
 
+  // Master switches: all ports ON / OFF.
+  $$('.btn-all-ports', el).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const on = btn.dataset.all === 'on';
+      $$('.port-card', el).forEach(card => {
+        card.classList.toggle('on', on);
+        const sw = $('.toggle-sw', card);
+        if (sw) sw.setAttribute('aria-checked', String(on));
+        const stEl = $('.port-state', card);
+        if (stEl) stEl.textContent = on ? 'ON' : 'OFF';
+      });
+      sendCmd(d.id, 'set_all_usb_ports', { on });
+    });
+  });
+
   // Control buttons
   $$('.btn-hub-ctrl', el).forEach(btn => {
     btn.addEventListener('click', () => {
@@ -409,6 +470,11 @@ function buildHubPage(el, d) {
       sendCmd(d.id, cmd, { [param]: next });
     });
   });
+
+  // Hide controls the controller does not implement (e.g. SanGenXian).
+  if (!hubControlsSupported(d)) {
+    $('.hub-ctrl-row', el)?.classList.add('hidden');
+  }
 
   buildPortPanel(el, d);
 }
@@ -579,6 +645,221 @@ function updateAlarmPage(el, s, deviceId) {
   }
 }
 
+// ─── Power monitor (F-11) page ─────────────────────────────────────────────────
+
+/** Interval (ms) requested when the panel is expanded / collapsed. */
+const MONITOR_INTERVAL_FAST = 10;   // expanded: average/peak measurement mode
+const MONITOR_INTERVAL_NORMAL = 500; // collapsed: simple meter mode
+
+/** Per-device chart state: ring buffers of samples for the curve plot. */
+const monitorCharts = new Map(); // deviceId → { volt:[], curr:[], voltMax, currMax, raf }
+
+function buildMonitorPage(el, d) {
+  monitorCharts.set(d.id, { volt: [], curr: [], voltMax: 1, currMax: 1 });
+
+  // ── Expand / fold button ─────────────────────────────────────────────────
+  const expBtn = $('.monitor-expand-btn', el);
+  const expBody = $('.monitor-expand-body', el);
+  if (expBtn) {
+    expBtn.addEventListener('click', () => {
+      const expanded = expBtn.getAttribute('aria-expanded') === 'true';
+      const next = !expanded;
+      expBtn.setAttribute('aria-expanded', String(next));
+      expBtn.classList.toggle('expanded', next);
+      expBody.classList.toggle('hidden', !next);
+      if (next) {
+        // Entering measurement mode: switch to 10ms sampling.
+        sendCmd(d.id, 'monitor_set_interval', { interval_ms: MONITOR_INTERVAL_FAST });
+      } else {
+        // Folding back: return to normal 500ms meter sampling.
+        sendCmd(d.id, 'monitor_set_interval', { interval_ms: MONITOR_INTERVAL_NORMAL });
+      }
+    });
+  }
+
+  // ── Start / Stop average-period control ──────────────────────────────────
+  const startBtn = $('.btn-monitor-start', el);
+  if (startBtn) {
+    startBtn.addEventListener('click', () => {
+      const running = startBtn.classList.contains('running');
+      if (running) {
+        sendCmd(d.id, 'monitor_stop', {});
+        startBtn.classList.remove('running');
+        startBtn.textContent = '▶ Start';
+      } else {
+        // Reset chart history when a new measurement period begins.
+        const ch = monitorCharts.get(d.id);
+        if (ch) { ch.volt = []; ch.curr = []; ch.voltMax = 1; ch.currMax = 1; }
+        sendCmd(d.id, 'monitor_start', {});
+        startBtn.classList.add('running');
+        startBtn.textContent = '⏸ Stop';
+      }
+    });
+  }
+
+  // ── Curve visibility checkboxes (independent voltage / current) ──────────
+  const voltCb = $('.chart-show-volt', el);
+  const currCb = $('.chart-show-curr', el);
+  if (voltCb) voltCb.addEventListener('change', () => drawMonitorChart(el, d.id));
+  if (currCb) currCb.addEventListener('change', () => drawMonitorChart(el, d.id));
+
+  // ── Canvas sizing (device-pixel-ratio aware) ─────────────────────────────
+  const canvas = $('.monitor-canvas', el);
+  if (canvas) {
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0) return;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width  = Math.round(rect.width * dpr);
+      canvas.height = Math.round(200 * dpr);
+      drawMonitorChart(el, d.id);
+    };
+    window.addEventListener('resize', resize);
+    // Defer initial sizing until the panel becomes visible.
+    setTimeout(resize, 50);
+    const exp = $('.monitor-expand-btn', el);
+    if (exp) exp.addEventListener('click', () => setTimeout(resize, 50));
+  }
+
+  buildPortPanel(el, d);
+}
+
+function updateMonitorPage(el, s, deviceId) {
+  if (!s) return;
+
+  // Simple-mode measurement cards
+  const vEl = $('.volt-value', el);
+  const aEl = $('.curr-value', el);
+  const pEl = $('.pow-value',  el);
+  const volt = s.voltage || 0;
+  const curr = s.current || 0;
+  if (vEl) vEl.textContent = volt.toFixed(3);
+  if (aEl) aEl.textContent = curr.toFixed(4);
+  if (pEl) pEl.textContent = (volt * curr).toFixed(3);
+
+  // Fill bars (relative to the running max seen on this page)
+  const ch = monitorCharts.get(deviceId);
+  if (ch) {
+    ch.voltMax = Math.max(ch.voltMax, volt);
+    ch.currMax = Math.max(ch.currMax, curr);
+    const vFill = $('.meas-volt .meas-bar-fill', el);
+    const aFill = $('.meas-curr .meas-bar-fill', el);
+    const pFill = $('.meas-pow  .meas-bar-fill', el);
+    if (vFill) vFill.style.width = Math.min(100, (volt / ch.voltMax) * 100).toFixed(1) + '%';
+    if (aFill) aFill.style.width = Math.min(100, (curr / ch.currMax) * 100).toFixed(1) + '%';
+    if (pFill) pFill.style.width = Math.min(100, (volt * curr) / (ch.voltMax * ch.currMax) * 100).toFixed(1) + '%';
+  }
+
+  // Interval badge & sample count
+  const iEl = $('.interval-value', el);
+  if (iEl && s.interval_ms) iEl.textContent = s.interval_ms + 'ms';
+  const sEl = $('.samples-value', el);
+  if (sEl) sEl.textContent = String(s.sample_count || 0);
+
+  // Average / peak stats
+  const av = $('.avg-volt',  el);
+  const ac = $('.avg-curr',  el);
+  const pv = $('.peak-volt', el);
+  const pc = $('.peak-curr', el);
+  if (av) av.innerHTML = (s.avg_voltage ?? 0).toFixed(3) + ' <small>V</small>';
+  if (ac) ac.innerHTML = (s.avg_current ?? 0).toFixed(4) + ' <small>A</small>';
+  if (pv) pv.innerHTML = (s.peak_voltage ?? 0).toFixed(3) + ' <small>V</small>';
+  if (pc) pc.innerHTML = (s.peak_current ?? 0).toFixed(4) + ' <small>A</small>';
+  const mc = $('.mon-sample-count', el);
+  if (mc) mc.textContent = String(s.sample_count || 0);
+
+  // Start/stop button state (only reflect server state when idle locally)
+  const startBtn = $('.btn-monitor-start', el);
+  if (startBtn) {
+    startBtn.classList.toggle('running', !!s.monitoring);
+    startBtn.textContent = s.monitoring ? '⏸ Stop' : '▶ Start';
+  }
+
+  // Append sample to chart history and redraw
+  if (ch) {
+    ch.volt.push(volt);
+    ch.curr.push(curr);
+    // Keep a bounded window: ~600 samples ≈ 6s at 10ms, 5min at 500ms.
+    if (ch.volt.length > 600) ch.volt.shift();
+    if (ch.curr.length > 600) ch.curr.shift();
+    scheduleMonitorDraw(el, deviceId);
+  }
+}
+
+/** rAF-throttled chart redraw so 100 Hz sample streams still render at 60fps max. */
+function scheduleMonitorDraw(el, deviceId) {
+  const ch = monitorCharts.get(deviceId);
+  if (!ch || ch.raf) return;
+  ch.raf = requestAnimationFrame(() => {
+    ch.raf = 0;
+    drawMonitorChart(el, deviceId);
+  });
+}
+
+/** Draws the voltage/current curve chart onto the canvas. */
+function drawMonitorChart(el, deviceId) {
+  const canvas = $('.monitor-canvas', el);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const ch = monitorCharts.get(deviceId);
+  if (!ch) return;
+
+  const showVolt = $('.chart-show-volt', el)?.checked !== false;
+  const showCurr = $('.chart-show-curr', el)?.checked !== false;
+
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  ctx.fillStyle = '#0b1120';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(148,163,184,.12)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = (H / 4) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  for (let i = 1; i < 8; i++) {
+    const x = (W / 8) * i;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+
+  const pad = 8;
+  const plotW = W - pad * 2;
+  const plotH = H - pad * 2;
+
+  const series = [
+    { data: ch.volt, max: Math.max(ch.voltMax, 0.001), color: '#4ade80', show: showVolt },
+    { data: ch.curr, max: Math.max(ch.currMax, 0.0001), color: '#f87171', show: showCurr },
+  ];
+
+  for (const s of series) {
+    if (!s.show || s.data.length < 2) continue;
+    const n = s.data.length;
+    const step = plotW / Math.max(1, s.data.length - 1);
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = pad + i * step;
+      const norm = Math.min(1, s.data[i] / s.max);
+      const y = pad + plotH * (1 - norm);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 2 * (window.devicePixelRatio || 1);
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    // Soft glow under the curve
+    ctx.lineTo(pad + plotW, pad + plotH);
+    ctx.lineTo(pad, pad + plotH);
+    ctx.closePath();
+    ctx.fillStyle = s.color + '22'; // ~13% alpha
+    ctx.fill();
+  }
+}
+
 // ─── Server message handler ────────────────────────────────────────────────────
 
 function handleServerMsg(msg) {
@@ -626,6 +907,13 @@ function handleServerMsg(msg) {
 
 function updatePage(page, d, s) {
   if (!s) return;
+  // Power monitors stream at up to 100 Hz – skip the shared debounce so no
+  // chart samples are dropped; drawing itself is rAF-throttled.
+  if (isMonitor(d.type)) {
+    updateMonitorPage(page, s, d.id);
+    updatePortPanel(page, d.connected);
+    return;
+  }
   // Debounce UI redraws: coalesce bursts within 20ms
   debounce(`ui:${d.id}`, () => {
     if (isHub(d.type)) {
@@ -699,6 +987,7 @@ function buildPortPanel(el, d) {
     portSel.value = d.port;
   }
   if (d.baud) baudSel.value = String(d.baud);
+  else if (d.type === 'sangenxian') baudSel.value = '4800';
 
   // Refresh port list from the server when the dropdown is about to open.
   portSel.addEventListener('mousedown', async () => {
@@ -724,6 +1013,7 @@ function buildPortPanel(el, d) {
         _setPortPanelState(indicator, btn, false);
       } finally {
         btn.disabled = false;
+        refreshSerialLog();
       }
     } else {
       // ── Connect ─────────────────────────────────────────────────────────────
@@ -755,6 +1045,7 @@ function buildPortPanel(el, d) {
         _setPortPanelState(indicator, btn, false);
       } finally {
         btn.disabled = false;
+        refreshSerialLog();
       }
     }
   });
@@ -899,9 +1190,107 @@ async function scanPorts() {
   cont.classList.toggle('hidden', !ports?.length);
 }
 
+// ─── Serial port debug log ─────────────────────────────────────────────────────
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+async function refreshSerialLog() {
+  const box = document.getElementById('serial-log');
+  if (!box) return;
+  try {
+    const resp = await fetch('/api/serial-log');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const events = data.events || [];
+    const count = document.getElementById('serial-log-count');
+    if (count) count.textContent = `${events.length} event${events.length === 1 ? '' : 's'}`;
+    if (events.length === 0) {
+      box.innerHTML = '<div class="serial-log-empty">No serial-port activity recorded yet.</div>';
+      return;
+    }
+    // Keep the view pinned to the newest entry unless the user scrolled up.
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 12;
+    box.innerHTML = events.map(e => {
+      const action = e.action || '';
+      const label = action === 'open_failed' ? 'FAILED' : action.toUpperCase();
+      const details = [
+        e.owner  ? `<span class="serial-log-owner">${escapeHTML(e.owner)}</span>` : '',
+        `<span>${escapeHTML(e.port || '')}${e.baud ? ' @ ' + e.baud : ''}</span>`,
+        e.caller ? `<span class="serial-log-caller">${escapeHTML(e.caller)}</span>` : '',
+        e.error  ? `<span class="serial-log-error">${escapeHTML(e.error)}</span>` : '',
+      ].filter(Boolean).join(' · ');
+      return `<div class="serial-log-row">
+        <span class="serial-log-time">${escapeHTML(e.time || '')}</span>
+        <span class="serial-log-action ${escapeHTML(action)}">${label}</span>
+        <span class="serial-log-body">${details}</span>
+      </div>`;
+    }).join('');
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch (_) { /* ignore transient fetch errors */ }
+}
+
+async function clearSerialLog() {
+  try { await fetch('/api/serial-log', { method: 'DELETE' }); } catch (_) {}
+  refreshSerialLog();
+}
+
+/** Explicitly open every configured device.  Never called automatically. */
+async function connectAll() {
+  const btn = document.getElementById('btn-connect-all');
+  if (btn) { btn.disabled = true; btn.textContent = 'Connecting…'; }
+  const failures = [];
+  for (const d of Object.values(state.devices)) {
+    if (d.connected) continue;
+    try {
+      const resp = await fetch(`/api/device/${d.id}/connect`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ port: d.port, baud: d.baud }),
+      });
+      if (resp.ok) {
+        d.connected = true;
+      } else {
+        const err = await resp.json().catch(() => ({}));
+        failures.push(`${d.id} (${d.port}): ${err.error || 'connect failed'}`);
+      }
+    } catch (e) {
+      failures.push(`${d.id}: ${e}`);
+    }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Connect All'; }
+  refreshSerialLog();
+  if (failures.length) alert('Some devices failed to connect:\n' + failures.join('\n'));
+}
+
+let _serialLogTimer = null;
+function startSerialLogAutoRefresh() {
+  if (_serialLogTimer) return;
+  _serialLogTimer = setInterval(() => {
+    const auto = document.getElementById('serial-log-auto');
+    const page = document.getElementById('page-settings');
+    if (!auto || !auto.checked) return;
+    if (!page || !page.classList.contains('active')) return;
+    refreshSerialLog();
+  }, 2000);
+}
+
 // ─── Wire settings form ────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Brand / logo returns to the device overview.
+  const brandHome = document.getElementById('brand-home');
+  brandHome?.addEventListener('click', goHome);
+  brandHome?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      goHome();
+    }
+  });
+
   // Settings button
   document.getElementById('btn-settings').addEventListener('click', () => {
     state.activeTab = 'settings';
@@ -909,6 +1298,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('devices-container').classList.add('hidden');
     document.getElementById('page-empty')?.classList.remove('active');
     showPage('settings');
+    refreshSerialLog();
   });
 
   // Add device button
@@ -916,6 +1306,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const form = document.getElementById('device-form');
     if (form) form.parentElement.scrollIntoView({ behavior: 'smooth' });
   });
+
+  // Connect all devices – explicit user action only.
+  document.getElementById('btn-connect-all')?.addEventListener('click', connectAll);
+
+  // Serial port debug panel
+  document.getElementById('btn-serial-log-refresh')?.addEventListener('click', refreshSerialLog);
+  document.getElementById('btn-serial-log-clear')?.addEventListener('click', clearSerialLog);
+  document.getElementById('serial-log-auto')?.addEventListener('change', (e) => {
+    if (e.target.checked) refreshSerialLog();
+  });
+  startSerialLogAutoRefresh();
 
   // Cancel form – reset and return to the devices view
   document.getElementById('btn-cancel-form')?.addEventListener('click', () => {
@@ -938,9 +1339,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const type = document.getElementById('df-type').value;
     const baud = document.getElementById('df-baud');
     if (type === 'usbalarm') baud.value = '4800';
-    else if (type === 'spm3051') baud.value = '115200';
+    else if (type === 'spm3051') baud.value = '9600';
     else if (type === 'pd_pocket') baud.value = '115200';
     else if (type === 'usbslim') baud.value = '9600';
+    else if (type === 'sangenxian') baud.value = '4800';
+    else if (type === 'f11') baud.value = '38400';
+    else if (type === 'powerz') baud.value = '115200';
   });
 
   // Submit device form
@@ -958,4 +1362,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Load saved devices immediately from HTTP API, then open WebSocket for live updates
   loadFromAPI().then(() => connectWS());
+
+  // Show app version badge next to the brand name
+  fetch('/api/version')
+    .then(r => r.json())
+    .then(({ version }) => {
+      if (version) document.getElementById('app-version').textContent = `v${version}`;
+    })
+    .catch(() => {});
 });

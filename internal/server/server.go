@@ -12,6 +12,8 @@
 //	DELETE /api/config/device/{id}  – remove a device config
 //	GET  /api/config                – dump full config JSON
 //	POST /api/config                – replace full config JSON
+//	GET  /api/version               – application version
+//	POST /mcp                       – MCP Streamable HTTP endpoint (JSON-RPC)
 package server
 
 import (
@@ -20,7 +22,9 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +33,9 @@ import (
 
 	"github.com/yuguorong/power_wing/internal/config"
 	"github.com/yuguorong/power_wing/internal/manager"
+	"github.com/yuguorong/power_wing/internal/mcp"
 	"github.com/yuguorong/power_wing/internal/serialport"
+	"github.com/yuguorong/power_wing/internal/version"
 )
 
 var upgrader = websocket.Upgrader{
@@ -77,6 +83,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/devices", s.handleDevices)
 	s.mux.HandleFunc("/api/device/", s.handleDevice)
 	s.mux.HandleFunc("/api/serial-ports", s.handleSerialPorts)
+	s.mux.HandleFunc("/api/serial-log", s.handleSerialLog)
+	s.mux.HandleFunc("/api/version", s.handleVersion)
+	// MCP Streamable HTTP — lets remote / WSL AI clients connect over plain
+	// HTTP instead of stdio (which WSL interop mangles) or raw TCP.
+	s.mux.Handle("/mcp", mcp.NewHTTP(s.mgr))
 	s.mux.HandleFunc("/api/config", s.handleConfig)
 	s.mux.HandleFunc("/api/config/device", s.handleConfigDevice)
 	s.mux.HandleFunc("/api/config/device/", s.handleConfigDevice)
@@ -95,7 +106,13 @@ func (s *Server) Start() error {
 	sub := s.mgr.Subscribe()
 	go s.fanOut(sub)
 
-	log.Printf("[server] listening on http://%s", addr)
+	// Log a browser-reachable URL (wildcard binds like 0.0.0.0 are rewritten
+	// to loopback; the listener itself still binds addr unchanged).
+	displayHost := s.host
+	if displayHost == "0.0.0.0" || displayHost == "::" || displayHost == "*" || displayHost == "" {
+		displayHost = "127.0.0.1"
+	}
+	log.Printf("[server] listening on http://%s (bind %s)", net.JoinHostPort(displayHost, strconv.Itoa(s.port)), addr)
 	return s.httpSrv.ListenAndServe()
 }
 
@@ -290,6 +307,23 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]string{"status": "ok"})
 
+	case "all-on", "all-off":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		on := action == "all-on"
+		req := manager.CmdRequest{
+			DeviceID: id,
+			Command:  "set_all_usb_ports",
+			Params:   map[string]interface{}{"on": on},
+		}
+		if err := s.mgr.SendCmd(req); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+
 	case "connect":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "POST only")
@@ -342,6 +376,20 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleSerialLog serves the in-memory serial open/close log.  GET returns the
+// events; DELETE (or POST) clears them.
+func (s *Server) handleSerialLog(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{"events": serialport.Log()})
+	case http.MethodDelete, http.MethodPost:
+		serialport.ClearLog()
+		writeJSON(w, map[string]string{"status": "ok"})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "GET or DELETE only")
+	}
+}
+
 func (s *Server) handleSerialPorts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "GET only")
@@ -353,6 +401,14 @@ func (s *Server) handleSerialPorts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, ports)
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	writeJSON(w, map[string]string{"version": version.Version})
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

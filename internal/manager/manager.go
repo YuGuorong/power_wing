@@ -14,15 +14,22 @@ import (
 
 	"github.com/yuguorong/power_wing/internal/config"
 	"github.com/yuguorong/power_wing/internal/device"
+	"github.com/yuguorong/power_wing/internal/device/f11"
 	"github.com/yuguorong/power_wing/internal/device/pdpocket"
+	"github.com/yuguorong/power_wing/internal/device/powerz"
+	"github.com/yuguorong/power_wing/internal/device/sangenxian"
 	"github.com/yuguorong/power_wing/internal/device/spm3051"
 	"github.com/yuguorong/power_wing/internal/device/usbalarm"
 	"github.com/yuguorong/power_wing/internal/device/usbslim"
 )
 
 const (
-	pollInterval      = 1 * time.Second
-	reconnectInterval = 5 * time.Second
+	pollInterval = 1 * time.Second
+	// reconnectInterval controls how fast a dropped device is revived by the
+	// auto-reconnect loop (e.g. monitor resuming sampling after a USB replug).
+	// 1s keeps the gap between a port reappearing and the device reconnecting
+	// within the 1-2s requirement.
+	reconnectInterval = 1 * time.Second
 	readDeviceTimeout = 500 * time.Millisecond
 )
 
@@ -69,6 +76,20 @@ type Manager struct {
 	// The auto-reconnect loop skips these until the user reconnects.
 	manualDisconnect map[string]bool
 
+	// everConnected records devices that have successfully opened their port
+	// at least once in this process.  The reconnect loop only revives these
+	// devices; configured-but-never-used devices are never opened
+	// automatically.  This prevents stale COM assignments from grabbing a
+	// port that now belongs to another device or application.
+	everConnected map[string]bool
+
+	// lazy disables automatic serial-port opening at startup and when devices
+	// are added or reconfigured.  It is the default for both GUI and MCP
+	// modes: ports are only opened by an explicit connect (UI button / HTTP)
+	// or when a command targets a device (see execCmd).  Start(), used by the
+	// --auto-connect opt-in, clears it.
+	lazy bool
+
 	subsMu sync.Mutex
 	subs   []chan StateUpdate
 
@@ -85,23 +106,28 @@ func New(cfg *config.Config) *Manager {
 		states:           make(map[string]interface{}),
 		renames:          make(map[string]string),
 		manualDisconnect: make(map[string]bool),
+		everConnected:    make(map[string]bool),
 		cmdCh:            make(chan CmdRequest, 32),
 		stopCh:           make(chan struct{}),
 	}
 }
 
-// Start connects to all configured devices and begins polling.
+// Start connects to all configured devices and begins polling.  This opens
+// every enabled device's serial port at startup and is only used when the
+// user explicitly opts in with --auto-connect.
 func (m *Manager) Start() error {
 	return m.start(true)
 }
 
-// LazyStart registers all devices without auto-connecting (for MCP mode).
-// Devices will be connected on demand when send_command or reconnect_device is called.
+// LazyStart registers all devices without opening any serial port.  This is
+// the default for both the GUI and MCP modes: ports are opened only by an
+// explicit connect (UI button / HTTP API) or when a command targets a device.
 func (m *Manager) LazyStart() error {
 	return m.start(false)
 }
 
 func (m *Manager) start(autoConnect bool) error {
+	m.lazy = !autoConnect
 	for _, dc := range m.cfg.Devices {
 		if !dc.Enabled {
 			continue
@@ -111,6 +137,7 @@ func (m *Manager) start(autoConnect bool) error {
 			log.Printf("[manager] %s: cannot create device: %v", dc.ID, err)
 			continue
 		}
+		m.registerSampleHandler(dev)
 		m.devices[dc.ID] = dev
 		if dc.Name != "" {
 			m.renames[dc.ID] = dc.Name
@@ -119,10 +146,11 @@ func (m *Manager) start(autoConnect bool) error {
 			if err := dev.Connect(); err != nil {
 				log.Printf("[manager] %s: connect failed (will retry): %v", dc.ID, err)
 			} else {
+				m.everConnected[dc.ID] = true
 				log.Printf("[manager] %s: connected", dc.ID)
 			}
 		} else {
-			log.Printf("[manager] %s: registered (lazy, will connect on demand)", dc.ID)
+			log.Printf("[manager] %s: registered (lazy; connect explicitly to open %s)", dc.ID, dc.Port)
 		}
 	}
 
@@ -233,21 +261,64 @@ func (m *Manager) SendCmd(req CmdRequest) error {
 	return <-req.Result
 }
 
-// AddDevice creates and connects a new device at runtime, and persists the
-// config entry.
+// AddDevice creates a new device at runtime and persists the config entry.
+// The serial port is only opened immediately when auto-connect mode is active;
+// otherwise the user connects explicitly from the UI.
 func (m *Manager) AddDevice(dc config.DeviceConfig) error {
 	dev, err := makeDevice(dc)
 	if err != nil {
 		return err
 	}
-	if err := dev.Connect(); err != nil {
-		log.Printf("[manager] %s: connect failed (will retry): %v", dc.ID, err)
+
+	// Replace an existing instance cleanly so its old port handle is released
+	// before the new driver opens the same (or a different) port.
+	m.mu.Lock()
+	old := m.devices[dc.ID]
+	m.mu.Unlock()
+	if old != nil {
+		_ = old.Disconnect()
+		m.mu.Lock()
+		delete(m.states, dc.ID)
+		delete(m.everConnected, dc.ID)
+		delete(m.manualDisconnect, dc.ID)
+		m.mu.Unlock()
+	}
+
+	m.registerSampleHandler(dev)
+	if !m.lazy {
+		if err := dev.Connect(); err != nil {
+			log.Printf("[manager] %s: connect failed: %v", dc.ID, err)
+		} else {
+			m.markEverConnected(dc.ID)
+		}
+	} else {
+		log.Printf("[manager] %s: registered (lazy; connect explicitly to open %s)", dc.ID, dc.Port)
 	}
 	m.mu.Lock()
 	m.devices[dc.ID] = dev
 	m.mu.Unlock()
 	m.cfg.UpsertDevice(dc)
 	return m.cfg.Save()
+}
+
+// registerSampleHandler wires a PowerMonitor's sample callback so every decoded
+// sample is pushed to WebSocket clients in real time.
+func (m *Manager) registerSampleHandler(dev device.Device) {
+	pm, ok := dev.(device.PowerMonitor)
+	if !ok {
+		return
+	}
+	pm.SetSampleHandler(func(st *device.MonitorState) {
+		m.mu.Lock()
+		m.states[dev.ID()] = st
+		m.mu.Unlock()
+		m.broadcast(StateUpdate{
+			DeviceID:   dev.ID(),
+			DeviceType: dev.Type(),
+			DeviceName: dev.Name(),
+			State:      st,
+		})
+	})
 }
 
 // Config returns the current configuration (read-only reference).
@@ -259,6 +330,284 @@ func (m *Manager) ReplaceConfig(newCfg *config.Config) error {
 	m.cfg = newCfg
 	m.mu.Unlock()
 	return newCfg.Save()
+}
+
+// SetConfig replaces the configured device list.  It validates every entry
+// (non-empty unique IDs, unique ports, known device type), reconciles the live
+// device instances (removing, adding, or recreating drivers as needed), and
+// persists the result.  Serial ports are only ever opened for devices that are
+// part of the new configuration.
+func (m *Manager) SetConfig(devices []config.DeviceConfig) error {
+	// Validate everything up front so a bad entry cannot half-apply.
+	ids := make(map[string]bool, len(devices))
+	ports := make(map[string]bool, len(devices))
+	for _, dc := range devices {
+		if strings.TrimSpace(dc.ID) == "" {
+			return fmt.Errorf("device id cannot be empty")
+		}
+		if ids[dc.ID] {
+			return fmt.Errorf("duplicate device id %q", dc.ID)
+		}
+		ids[dc.ID] = true
+		if dc.Port != "" {
+			if ports[dc.Port] {
+				return fmt.Errorf("serial port %q is assigned to more than one device", dc.Port)
+			}
+			ports[dc.Port] = true
+		}
+		if _, err := makeDevice(dc); err != nil {
+			return err
+		}
+	}
+
+	// Snapshot the old configuration and live instances for comparison.
+	m.mu.Lock()
+	old := make(map[string]config.DeviceConfig, len(m.cfg.Devices))
+	for _, d := range m.cfg.Devices {
+		old[d.ID] = d
+	}
+	live := make(map[string]device.Device, len(m.devices))
+	for id, d := range m.devices {
+		live[id] = d
+	}
+	m.mu.Unlock()
+
+	// Tear down live instances that are gone, disabled, or need a driver
+	// rebuild because their port/baud changed.
+	for _, nd := range devices {
+		if dev, ok := live[nd.ID]; ok {
+			od := old[nd.ID]
+			if !nd.Enabled || nd.Port != od.Port || nd.Baud != od.Baud {
+				_ = dev.Disconnect()
+				m.mu.Lock()
+				delete(m.devices, nd.ID)
+				delete(m.states, nd.ID)
+				delete(m.manualDisconnect, nd.ID)
+				delete(m.everConnected, nd.ID)
+				m.mu.Unlock()
+				delete(live, nd.ID)
+			}
+		}
+	}
+	for id, dev := range live {
+		if !ids[id] {
+			_ = dev.Disconnect()
+			m.mu.Lock()
+			delete(m.devices, id)
+			delete(m.states, id)
+			delete(m.renames, id)
+			delete(m.manualDisconnect, id)
+			delete(m.everConnected, id)
+			m.mu.Unlock()
+		}
+	}
+
+	// Register devices that are new or were torn down above.
+	for _, dc := range devices {
+		if !dc.Enabled {
+			continue
+		}
+		m.mu.RLock()
+		_, already := m.devices[dc.ID]
+		m.mu.RUnlock()
+		if already {
+			// Only metadata changed; update the display name override.
+			m.mu.Lock()
+			if dc.Name != "" {
+				m.renames[dc.ID] = dc.Name
+			} else {
+				delete(m.renames, dc.ID)
+			}
+			m.mu.Unlock()
+			continue
+		}
+		dev, err := makeDevice(dc)
+		if err != nil {
+			return err
+		}
+		m.registerSampleHandler(dev)
+		m.mu.Lock()
+		m.devices[dc.ID] = dev
+		if dc.Name != "" {
+			m.renames[dc.ID] = dc.Name
+		}
+		delete(m.manualDisconnect, dc.ID)
+		delete(m.everConnected, dc.ID)
+		m.mu.Unlock()
+		if !m.lazy {
+			if err := dev.Connect(); err != nil {
+				log.Printf("[manager] %s: connect failed: %v", dc.ID, err)
+			} else {
+				m.markEverConnected(dc.ID)
+				log.Printf("[manager] %s: connected", dc.ID)
+			}
+		} else {
+			log.Printf("[manager] %s: registered (lazy; connect explicitly to open %s)", dc.ID, dc.Port)
+		}
+	}
+
+	// Persist the new device list, keeping the other config fields.
+	m.mu.Lock()
+	m.cfg.Devices = devices
+	m.mu.Unlock()
+	return m.cfg.Save()
+}
+
+// SetDeviceEnabled flips the enabled flag of an existing device entry and
+// persists it.  Disabling tears down the live instance (closing its serial
+// port); enabling registers a driver that the caller may then configure or
+// connect.
+func (m *Manager) SetDeviceEnabled(id string, enabled bool) error {
+	m.mu.Lock()
+	var dc config.DeviceConfig
+	found := false
+	for _, d := range m.cfg.Devices {
+		if d.ID == id {
+			dc = d
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.mu.Unlock()
+		return fmt.Errorf("unknown device %q", id)
+	}
+	if dc.Enabled == enabled {
+		m.mu.Unlock()
+		return nil
+	}
+	dc.Enabled = enabled
+	m.cfg.UpsertDevice(dc)
+	dev, hasLive := m.devices[id]
+	m.mu.Unlock()
+
+	if !enabled {
+		if hasLive {
+			_ = dev.Disconnect()
+			m.mu.Lock()
+			delete(m.devices, id)
+			delete(m.states, id)
+			delete(m.manualDisconnect, id)
+			delete(m.everConnected, id)
+			m.mu.Unlock()
+		}
+	} else {
+		m.mu.RLock()
+		_, already := m.devices[id]
+		m.mu.RUnlock()
+		if !already {
+			dev, err := makeDevice(dc)
+			if err != nil {
+				return err
+			}
+			m.registerSampleHandler(dev)
+			m.mu.Lock()
+			m.devices[id] = dev
+			if dc.Name != "" {
+				m.renames[id] = dc.Name
+			}
+			delete(m.manualDisconnect, id)
+			delete(m.everConnected, id)
+			m.mu.Unlock()
+			if !m.lazy {
+				if err := dev.Connect(); err != nil {
+					log.Printf("[manager] %s: connect failed: %v", id, err)
+				} else {
+					m.markEverConnected(id)
+				}
+			}
+		}
+	}
+	return m.cfg.Save()
+}
+
+// SetDeviceConfig updates a single device entry by ID and persists it.  Pass
+// an empty port or a zero baud to keep the current values.  If the port/baud
+// actually changed, the live device instance is rebuilt and reconnected
+// (lazily in MCP mode); a purely metadata change leaves the connection
+// untouched.
+func (m *Manager) SetDeviceConfig(id, name, port string, baud int) error {
+	m.mu.Lock()
+	var dc config.DeviceConfig
+	found := false
+	for _, d := range m.cfg.Devices {
+		if d.ID == id {
+			dc = d
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.mu.Unlock()
+		return fmt.Errorf("unknown device %q", id)
+	}
+	newName := dc.Name
+	if name != "" {
+		newName = name
+	}
+	if port == "" {
+		port = dc.Port
+	}
+	if baud <= 0 {
+		baud = dc.Baud
+	}
+	connChanged := port != dc.Port || baud != dc.Baud
+	dev, hasLive := m.devices[id]
+	m.mu.Unlock()
+
+	// Reject a port that another device already owns.
+	for _, d := range m.cfg.Devices {
+		if d.ID != id && d.Port != "" && d.Port == port {
+			return fmt.Errorf("serial port %q is already assigned to device %q", port, d.ID)
+		}
+	}
+
+	if connChanged {
+		if hasLive {
+			_ = dev.Disconnect()
+			m.mu.Lock()
+			delete(m.devices, id)
+			delete(m.states, id)
+			delete(m.manualDisconnect, id)
+			delete(m.everConnected, id)
+			m.mu.Unlock()
+		}
+		m.mu.Lock()
+		dc.Port = port
+		dc.Baud = baud
+		dc.Name = newName
+		m.cfg.UpsertDevice(dc)
+		delete(m.everConnected, id)
+		m.mu.Unlock()
+
+		newDev, err := makeDevice(dc)
+		if err != nil {
+			return err
+		}
+		m.registerSampleHandler(newDev)
+		m.mu.Lock()
+		m.devices[id] = newDev
+		if newName != "" {
+			m.renames[id] = newName
+		}
+		m.mu.Unlock()
+		if !m.lazy {
+			if err := newDev.Connect(); err != nil {
+				log.Printf("[manager] %s: connect failed: %v", id, err)
+			} else {
+				m.markEverConnected(id)
+			}
+		}
+	} else {
+		m.mu.Lock()
+		dc.Name = newName
+		m.cfg.UpsertDevice(dc)
+		if newName != "" {
+			m.renames[id] = newName
+		}
+		m.mu.Unlock()
+	}
+	return m.cfg.Save()
 }
 
 // DisconnectDevice disconnects a device but keeps it registered so the UI
@@ -315,6 +664,7 @@ func (m *Manager) ReconnectDevice(id, port string, baud int) error {
 	if err != nil {
 		return err
 	}
+	m.registerSampleHandler(newDev)
 	m.mu.Lock()
 	m.devices[id] = newDev         // register first so poll loop can see it
 	delete(m.manualDisconnect, id) // user asked to reconnect — clear the block
@@ -322,6 +672,7 @@ func (m *Manager) ReconnectDevice(id, port string, baud int) error {
 	if err := newDev.Connect(); err != nil {
 		return fmt.Errorf("connect %q: %w", id, err)
 	}
+	m.markEverConnected(id)
 	return nil
 }
 
@@ -333,6 +684,9 @@ func (m *Manager) RemoveDevice(id string) error {
 		_ = dev.Disconnect()
 		delete(m.devices, id)
 		delete(m.states, id)
+		delete(m.renames, id)
+		delete(m.manualDisconnect, id)
+		delete(m.everConnected, id)
 	}
 	m.mu.Unlock()
 	m.cfg.RemoveDevice(id)
@@ -382,6 +736,7 @@ func (m *Manager) pollDevice(id string) {
 	if !ok || !dev.IsConnected() {
 		return
 	}
+	m.markEverConnected(id)
 	ctx, cancel := context.WithTimeout(context.Background(), readDeviceTimeout)
 	defer cancel()
 	var st interface{}
@@ -392,6 +747,8 @@ func (m *Manager) pollDevice(id string) {
 	case device.USBHub:
 		st, err = d.GetState(ctx)
 	case device.AlarmLight:
+		st, err = d.GetState(ctx)
+	case device.PowerMonitor:
 		st, err = d.GetState(ctx)
 	}
 	if err != nil {
@@ -424,6 +781,7 @@ func (m *Manager) pollAll() {
 		if !dev.IsConnected() {
 			continue
 		}
+		m.markEverConnected(dev.ID())
 		var state interface{}
 		var err error
 		switch d := dev.(type) {
@@ -432,6 +790,8 @@ func (m *Manager) pollAll() {
 		case device.USBHub:
 			state, err = d.GetState(ctx)
 		case device.AlarmLight:
+			state, err = d.GetState(ctx)
+		case device.PowerMonitor:
 			state, err = d.GetState(ctx)
 		}
 		if err != nil {
@@ -459,19 +819,40 @@ func (m *Manager) reconnectAll() {
 	m.mu.RUnlock()
 
 	for _, dev := range devs {
-		if !dev.IsConnected() {
-			// Skip devices the user manually disconnected.
-			m.mu.RLock()
-			skip := m.manualDisconnect[dev.ID()]
-			m.mu.RUnlock()
-			if skip {
-				continue
-			}
-			if err := dev.Connect(); err == nil {
-				log.Printf("[manager] %s: reconnected", dev.ID())
-			}
+		id := dev.ID()
+		if dev.IsConnected() {
+			m.markEverConnected(id)
+			continue
+		}
+		m.mu.RLock()
+		// In lazy mode (the default), never open a port for a device that has
+		// not been explicitly used in this process.  This is the guard that
+		// keeps configured-but-unused (possibly stale) COM ports free for
+		// other applications.  Auto-connect mode (--auto-connect) keeps the
+		// old retry-everything behaviour.
+		ever := m.everConnected[id]
+		skip := m.manualDisconnect[id]
+		lazy := m.lazy
+		m.mu.RUnlock()
+		if skip || (!ever && lazy) {
+			continue
+		}
+		if err := dev.Connect(); err == nil {
+			m.markEverConnected(id)
+			log.Printf("[manager] %s: reconnected", id)
 		}
 	}
+}
+
+// markEverConnected records a successful, user-initiated (or auto-connect
+// opt-in) open so the reconnect loop may revive it later.
+func (m *Manager) markEverConnected(id string) {
+	m.mu.Lock()
+	if m.everConnected == nil {
+		m.everConnected = make(map[string]bool)
+	}
+	m.everConnected[id] = true
+	m.mu.Unlock()
 }
 
 func (m *Manager) broadcast(u StateUpdate) {
@@ -496,11 +877,15 @@ func (m *Manager) execCmd(req CmdRequest) error {
 	}
 
 	// Lazy-connect: if the device is registered but not connected, auto-connect now.
-	if !dev.IsConnected() && !m.manualDisconnect[req.DeviceID] {
+	m.mu.RLock()
+	manualDisc := m.manualDisconnect[req.DeviceID]
+	m.mu.RUnlock()
+	if !dev.IsConnected() && !manualDisc {
 		log.Printf("[manager] %s: lazy-connecting before command %q", req.DeviceID, req.Command)
 		if err := dev.Connect(); err != nil {
 			return fmt.Errorf("lazy-connect %s: %w", req.DeviceID, err)
 		}
+		m.markEverConnected(req.DeviceID)
 		log.Printf("[manager] %s: lazy-connected", req.DeviceID)
 	}
 
@@ -583,6 +968,20 @@ func (m *Manager) execCmd(req CmdRequest) error {
 		go m.pollDevice(req.DeviceID)
 		return nil
 
+	case "release_control":
+		// Hand the front panel back without disconnecting, so polling (and
+		// therefore monitoring) continues.  The next set command re-takes
+		// control on devices that support it.
+		rr, ok := dev.(device.ControlReleaser)
+		if !ok {
+			return fmt.Errorf("%s does not support releasing front-panel control", req.DeviceID)
+		}
+		if err := rr.ReleaseControl(ctx); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
 	// ── USB hub ───────────────────────────────────────────────────────────────
 	case "set_usb_port":
 		hub, ok := dev.(device.USBHub)
@@ -598,6 +997,21 @@ func (m *Manager) execCmd(req CmdRequest) error {
 			return err
 		}
 		return hub.SetPort(ctx, port, on)
+
+	case "set_all_usb_ports":
+		hub, ok := dev.(device.USBHub)
+		if !ok {
+			return fmt.Errorf("%s is not a USB hub", req.DeviceID)
+		}
+		on, err := boolParam(req.Params, "on")
+		if err != nil {
+			return err
+		}
+		if err := hub.SetAllPorts(ctx, on); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
 
 	case "set_lock":
 		hub, ok := dev.(device.USBHub)
@@ -763,6 +1177,59 @@ func (m *Manager) execCmd(req CmdRequest) error {
 		}()
 		return nil
 
+	// ── power monitor (F-11) ────────────────────────────────────────────────
+	case "monitor_set_interval":
+		pm, ok := dev.(device.PowerMonitor)
+		if !ok {
+			return fmt.Errorf("%s is not a power monitor", req.DeviceID)
+		}
+		ms, err := intParam(req.Params, "interval_ms")
+		if err != nil {
+			return err
+		}
+		if err := pm.SetInterval(ctx, ms); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "monitor_set_print":
+		pm, ok := dev.(device.PowerMonitor)
+		if !ok {
+			return fmt.Errorf("%s is not a power monitor", req.DeviceID)
+		}
+		mode, err := intParam(req.Params, "mode")
+		if err != nil {
+			return err
+		}
+		if err := pm.SetPrint(ctx, mode); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "monitor_start":
+		pm, ok := dev.(device.PowerMonitor)
+		if !ok {
+			return fmt.Errorf("%s is not a power monitor", req.DeviceID)
+		}
+		if err := pm.StartMonitor(ctx); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "monitor_stop":
+		pm, ok := dev.(device.PowerMonitor)
+		if !ok {
+			return fmt.Errorf("%s is not a power monitor", req.DeviceID)
+		}
+		if err := pm.StopMonitor(ctx); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
 	default:
 		return fmt.Errorf("unknown command %q", req.Command)
 	}
@@ -780,6 +1247,12 @@ func makeDevice(dc config.DeviceConfig) (device.Device, error) {
 		return usbslim.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
 	case "usbalarm":
 		return usbalarm.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
+	case "sangenxian":
+		return sangenxian.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
+	case "f11":
+		return f11.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
+	case "powerz":
+		return powerz.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
 	default:
 		return nil, fmt.Errorf("unknown device type %q", dc.Type)
 	}

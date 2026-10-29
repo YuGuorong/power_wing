@@ -10,7 +10,7 @@ import (
 type DeviceConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Type    string `json:"type"` // "spm3051", "pd_pocket", "usbslim"
+	Type    string `json:"type"` // "spm3051", "pd_pocket", "usbslim", "sangenxian", "usbalarm", "f11", "powerz"
 	Port    string `json:"port"` // e.g. "COM3" or "/dev/ttyUSB0"
 	Baud    int    `json:"baud"` // 0 = use driver default
 	Enabled bool   `json:"enabled"`

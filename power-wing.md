@@ -13,12 +13,31 @@
 7. **Per-Device UI** — Individual pages for each power supply or hub
 8. **System Tray** — Quick access from system tray (Windows only)
 9. **Auto-Config** — Configuration auto-saved to platform-specific user config dir
+10. **Serial Port Debug** — Settings panel showing every serial open/close with owner, baud and caller
+11. **Windowless Background Mode** — Double-click `power_wing.exe` to run in the system tray without a console window
+12. **All Ports ON/OFF** — One-click master switches in every hub panel and `all-on` / `all-off` REST endpoints
 
 ## Supported Hardware
 
 - **SPM3051** — UART lab power supply (9600 baud, SCPI protocol) — see [SPM3051-CMD.txt](SPM3051-CMD.txt)
 - **PD_Pocket** — UART programmable PSU (115200 baud) — see [PD_Pocket API.txt](PD_Pocket%20API.txt)
 - **USB-Slim** — UART USB hub 4-port controller (9600 baud) — see [Usb-slim-api.txt](Usb-slim-api.txt)
+- **SanGenXian** — UART USB hub 12-port controller (4800 baud) — see [docs/api_sangenxian.md](docs/api_sangenxian.md)
+- **USB Alarm Light** — Modbus RTU 7-color alarm light (4800 baud) — see [alarm_light_api.md](alarm_light_api.md)
+- **F-11** — AFU IoT current/voltage monitor (38400 baud) — see [docs/api_f11.md](docs/api_f11.md)
+- **POWER-Z** — ChargerLAB KM002C/KM003C USB power meter (CDC port, baud ignored) — see [docs/api_powerz.md](docs/api_powerz.md)
+
+## Serial Port Safety
+
+PowerWing **never opens a serial port at startup by default**. Configured devices are registered but stay disconnected until you:
+
+- click **Connect** on the device's port panel, or
+- click **Connect All** in Settings, or
+- send a command to that device (MCP / REST / CLI).
+
+Automatic reconnect only applies to devices that were successfully opened at least once in the current process. A stale `COMx` assignment is never touched by the background loop. Pass `--auto-connect` to opt back into opening every enabled device at startup.
+
+Every open attempt, failure and close is recorded (owner, port, baud, source file/line) in **Settings → Serial Port Debug** and in the process log.
 
 ## Power Supply Features
 
@@ -51,13 +70,28 @@
 
 ```powershell
 # GUI mode (Web UI + system tray)
+# Double-click power_wing.exe in Explorer: no console window is shown.
 .\power_wing.exe
 
-# CLI mode (execute command and exit)
+# CLI mode (execute command and exit; run from a terminal)
 .\power_wing.exe --device psu1 --volt 5.0
 .\power_wing.exe --list-devices
 .\power_wing.exe --list-ports
 ```
+
+The Windows binary is a GUI-subsystem application. Double-clicking it runs
+silently in the background with the system-tray icon and the web UI. It
+attaches to the existing console when started from cmd/PowerShell, so CLI
+output still works.
+
+- **Log file:** `%AppData%\PowerWing\power_wing.log`
+- **Quit:** right-click the tray icon → Quit
+- **MCP:** opt-in. Double-click starts only the Web UI + tray. To run MCP
+  together with them, use
+  `--mcp=true --mcp-transport tcp --mcp-host 0.0.0.0 --mcp-port 9876`
+  (do **not** add `--mcp-only`, which disables the Web UI and tray). The MCP
+  TCP endpoint has no authentication; bind `127.0.0.1` instead of `0.0.0.0`
+  if you do not want LAN access.
 
 ### Linux / Ubuntu
 
@@ -157,8 +191,9 @@ All tools work on both Windows and Linux:
 - **powerwing_disconnect_device** — Disconnect device (manual mode)
 - **powerwing_reconnect_device** — Reconnect device with optional new port/baud
 - **powerwing_rename_device** — Change device display name
-- **powerwing_test_connection** — Probe all serial ports to discover where a device type is connected
+- **powerwing_test_connection** — Check whether configured devices of a type respond on their configured ports (never opens non-configured ports)
 - **powerwing_get_config** — Return the full current configuration (all devices, server port, feature flags)
+- **powerwing_set_config** — Set configuration (counterpart of get_config): pass the full `devices` list, or `device_id` + optional name/port/baud/enabled to update one device; omitted fields keep current values. Use with `powerwing_list_serial_ports` to assign ports.
 
 ### Protocol Details
 

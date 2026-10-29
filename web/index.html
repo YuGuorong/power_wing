@@ -8,11 +8,13 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="topbar-brand">
+  <div class="topbar-brand" id="brand-home" role="button" tabindex="0"
+       title="Back to the device overview" aria-label="PowerWing – back to devices">
     <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
     </svg>
     <span class="brand-name">PowerWing</span>
+    <span class="brand-version" id="app-version"></span>
   </div>
   <nav id="device-tabs" class="device-tabs"></nav>
   <button id="btn-settings" class="btn-icon" title="Settings">
@@ -44,7 +46,10 @@
       <section>
         <h3>Devices</h3>
         <div id="settings-device-list"></div>
-        <button class="btn-primary" id="btn-add-device">+ Add Device</button>
+        <div class="settings-actions">
+          <button class="btn-primary" id="btn-add-device">+ Add Device</button>
+          <button class="btn-secondary" id="btn-connect-all" title="Open the serial ports of all configured devices">Connect All</button>
+        </div>
       </section>
 
       <section>
@@ -57,7 +62,10 @@
               <option value="spm3051">SPM3051 (UART)</option>
               <option value="pd_pocket">PD Pocket (UART)</option>
               <option value="usbslim">USB-Slim Hub (UART)</option>
+              <option value="sangenxian">SanGenXian 12-Port Hub (UART)</option>
               <option value="usbalarm">USB Alarm Light (Modbus)</option>
+              <option value="f11">F-11 Power Monitor (UART)</option>
+              <option value="powerz">POWER-Z Power Meter (USB CDC)</option>
             </select>
           </label>
           <label>Port
@@ -72,6 +80,7 @@
               <option value="9600">9600</option>
               <option value="115200" selected>115200</option>
               <option value="57600">57600</option>
+              <option value="38400">38400</option>
               <option value="19200">19200</option>
             </select>
           </label>
@@ -81,6 +90,20 @@
           </div>
         </form>
         <div id="port-suggestions" class="port-suggestions hidden"></div>
+      </section>
+
+      <!-- Serial port debug: every open/close performed by this process -->
+      <section>
+        <h3>Serial Port Debug</h3>
+        <div class="serial-log-toolbar">
+          <label class="serial-log-auto"><input type="checkbox" id="serial-log-auto" checked> Auto refresh</label>
+          <button type="button" class="btn-secondary" id="btn-serial-log-refresh">Refresh</button>
+          <button type="button" class="btn-ghost" id="btn-serial-log-clear">Clear</button>
+          <span id="serial-log-count" class="serial-log-count"></span>
+        </div>
+        <div id="serial-log" class="serial-log">
+          <div class="serial-log-empty">No serial-port activity recorded yet.</div>
+        </div>
       </section>
     </div>
   </div>
@@ -148,6 +171,10 @@
               <div class="output-state">OFF</div>
             </div>
             <div class="mode-badge">CV</div>
+            <button class="btn-panel-release hidden" data-cmd="release_control"
+                    title="Release front-panel control to the operator; monitoring continues">
+              Release panel
+            </button>
             <div class="temp-row">
               <span class="temp-label">Temp</span>
               <span class="temp-value">—</span>
@@ -240,6 +267,7 @@
             <option value="19200">19200</option>
             <option value="57600">57600</option>
             <option value="115200">115200</option>
+            <option value="4800">4800</option>
           </select>
           <button class="btn-conn">Connect</button>
         </div>
@@ -247,8 +275,13 @@
 
       <!-- Device controls (disabled when disconnected) -->
       <div class="device-body">
+        <div class="hub-all-row">
+          <span class="hub-all-label">ALL PORTS</span>
+          <button class="btn-all-ports" data-all="on" title="Turn every port ON">All ON</button>
+          <button class="btn-all-ports" data-all="off" title="Turn every port OFF">All OFF</button>
+        </div>
         <div class="ports-row">
-          <!-- 4 port cards inserted by JS -->
+          <!-- Port cards inserted by JS (4 or 12 depending on device) -->
         </div>
         <div class="hub-ctrl-row">
           <button class="btn-hub-ctrl" data-cmd="set_lock" data-param="locked" data-state="false">🔒 Lock OFF</button>
@@ -416,6 +449,135 @@
             <button class="btn-alarm-action" data-cmd="alarm_pwm">Apply PWM</button>
           </div>
         </details>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-monitor">
+  <div class="page" data-device-type="power_monitor">
+    <div class="monitor-layout">
+      <!-- Port configuration – always visible at top -->
+      <div class="port-cfg-panel">
+        <div class="port-cfg-row">
+          <span class="device-name-label" title="Click to rename"></span>
+          <span class="conn-indicator" title="Disconnected"></span>
+          <span class="port-cfg-label">PORT</span>
+          <select class="port-cfg-select port-sel">
+            <option value="">— select —</option>
+          </select>
+          <span class="port-cfg-label">BPS</span>
+          <select class="port-cfg-select baud-sel">
+            <option value="9600">9600</option>
+            <option value="19200">19200</option>
+            <option value="38400" selected>38400</option>
+            <option value="57600">57600</option>
+            <option value="115200">115200</option>
+          </select>
+          <button class="btn-conn">Connect</button>
+        </div>
+      </div>
+
+      <div class="device-body">
+        <!-- Simple mode: live measurements -->
+        <div class="meas-row">
+          <div class="meas-card meas-volt">
+            <div class="meas-label">VOLTAGE</div>
+            <div class="meas-val-row">
+              <div class="meas-value volt-value">0.000</div>
+              <div class="meas-unit">V</div>
+            </div>
+            <div class="meas-bar-track"><div class="meas-bar-fill"></div></div>
+          </div>
+          <div class="meas-card meas-curr">
+            <div class="meas-label">CURRENT</div>
+            <div class="meas-val-row">
+              <div class="meas-value curr-value">0.000</div>
+              <div class="meas-unit">A</div>
+            </div>
+            <div class="meas-bar-track"><div class="meas-bar-fill"></div></div>
+          </div>
+          <div class="meas-card meas-pow">
+            <div class="meas-label">POWER</div>
+            <div class="meas-val-row">
+              <div class="meas-value pow-value">0.000</div>
+              <div class="meas-unit">W</div>
+            </div>
+            <div class="meas-bar-track"><div class="meas-bar-fill"></div></div>
+          </div>
+          <div class="status-col">
+            <div class="monitor-interval-badge">
+              <span class="temp-label">Interval</span>
+              <span class="interval-value">500ms</span>
+            </div>
+            <div class="temp-row">
+              <span class="temp-label">Samples</span>
+              <span class="samples-value">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Expandable measurement panel -->
+        <div class="monitor-expand-panel">
+          <button class="monitor-expand-btn" aria-expanded="false">
+            <span class="expand-arrow">▶</span>
+            <span class="expand-label">Measurement</span>
+          </button>
+
+          <div class="monitor-expand-body hidden">
+            <!-- Average / Peak controls -->
+            <div class="monitor-stats-row">
+              <div class="monitor-stats-card">
+                <div class="set-label">AVERAGE (10ms sampling)</div>
+                <div class="monitor-stat-grid">
+                  <div class="monitor-stat">
+                    <span class="monitor-stat-label">Avg Voltage</span>
+                    <span class="monitor-stat-value avg-volt">0.000 <small>V</small></span>
+                  </div>
+                  <div class="monitor-stat">
+                    <span class="monitor-stat-label">Avg Current</span>
+                    <span class="monitor-stat-value avg-curr">0.0000 <small>A</small></span>
+                  </div>
+                </div>
+              </div>
+              <div class="monitor-stats-card">
+                <div class="set-label">PEAK</div>
+                <div class="monitor-stat-grid">
+                  <div class="monitor-stat">
+                    <span class="monitor-stat-label">Peak Voltage</span>
+                    <span class="monitor-stat-value peak-volt">0.000 <small>V</small></span>
+                  </div>
+                  <div class="monitor-stat">
+                    <span class="monitor-stat-label">Peak Current</span>
+                    <span class="monitor-stat-value peak-curr">0.0000 <small>A</small></span>
+                  </div>
+                </div>
+              </div>
+              <div class="monitor-start-card">
+                <button class="btn-monitor-start">▶ Start</button>
+                <div class="monitor-count">N = <span class="mon-sample-count">0</span></div>
+              </div>
+            </div>
+
+            <!-- Real-time curve chart -->
+            <div class="monitor-chart-card">
+              <div class="monitor-chart-header">
+                <div class="set-label">REAL-TIME CURVE</div>
+                <div class="monitor-chart-controls">
+                  <label class="chart-toggle">
+                    <input type="checkbox" class="chart-show-volt" checked>
+                    <span class="chart-swatch chart-swatch--volt"></span>Voltage
+                  </label>
+                  <label class="chart-toggle">
+                    <input type="checkbox" class="chart-show-curr" checked>
+                    <span class="chart-swatch chart-swatch--curr"></span>Current
+                  </label>
+                </div>
+              </div>
+              <canvas class="monitor-canvas" height="200"></canvas>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

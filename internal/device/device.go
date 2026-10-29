@@ -49,10 +49,23 @@ type PowerState struct {
 	OutputOn     bool `json:"output_on"`
 	OVPTriggered bool `json:"ovp_triggered"`
 	OCPTriggered bool `json:"ocp_triggered"`
-	CVMode       bool `json:"cv_mode"` // true=CV, false=CC
+	OTPTriggered bool `json:"otp_triggered"` // over-temperature protection tripped
+	CVMode       bool `json:"cv_mode"`       // true=CV, false=CC
+	// RemoteControl is true while the PC holds front-panel control (the
+	// device's keys/knob are locked).  Devices without local/remote switching
+	// leave it false.
+	RemoteControl bool `json:"remote_control"`
 	// Optional extras
 	Temperature float64 `json:"temperature,omitempty"`
 	InputVolt   float64 `json:"input_volt,omitempty"`
+}
+
+// ControlReleaser is implemented by power supplies that can lock their local
+// front panel for remote operation.  ReleaseControl hands the panel back to
+// the operator while the device stays connected and polled; the next Set*
+// call takes control again automatically.
+type ControlReleaser interface {
+	ReleaseControl(ctx context.Context) error
 }
 
 // ─── USB hub ──────────────────────────────────────────────────────────────────
@@ -61,7 +74,9 @@ type PowerState struct {
 type USBHub interface {
 	Device
 	GetState(ctx context.Context) (*HubState, error)
-	SetPort(ctx context.Context, port int, on bool) error  // port 1-4
+	SetPort(ctx context.Context, port int, on bool) error // port 1..PortCount
+	// SetAllPorts switches every port ON or OFF in one operation.
+	SetAllPorts(ctx context.Context, on bool) error
 	SetLock(ctx context.Context, locked bool) error        // UI lock
 	SetHWKeys(ctx context.Context, enabled bool) error     // physical buttons
 	SetAutoSave(ctx context.Context, enabled bool) error   // auto-save state
@@ -70,11 +85,17 @@ type USBHub interface {
 
 // HubState carries everything the UI needs to render a USB hub page.
 type HubState struct {
-	Connected       bool    `json:"connected"`
-	Ports           [4]bool `json:"ports"` // true = ON
-	Locked          bool    `json:"locked"`
-	HWKeysEnabled   bool    `json:"hw_keys_enabled"`
-	AutoSaveEnabled bool    `json:"auto_save_enabled"`
+	Connected bool   `json:"connected"`
+	Ports     []bool `json:"ports"`      // true = ON, indexed by port-1
+	PortCount int    `json:"port_count"` // number of switchable ports
+	Locked    bool   `json:"locked"`
+	// Optional controls – drivers that lack the feature leave these false so
+	// the UI can hide the corresponding buttons.
+	HWKeysEnabled    bool `json:"hw_keys_enabled"`
+	AutoSaveEnabled  bool `json:"auto_save_enabled"`
+	SupportsLock     bool `json:"supports_lock"`
+	SupportsHWKeys   bool `json:"supports_hw_keys"`
+	SupportsAutoSave bool `json:"supports_auto_save"`
 }
 
 // ─── USB alarm light ──────────────────────────────────────────────────────────
@@ -102,4 +123,37 @@ type AlarmState struct {
 	PWMG          int    `json:"pwm_g"`
 	PWMB          int    `json:"pwm_b"`
 	FlashInterval int    `json:"flash_interval"`
+}
+
+// ─── Power monitor meter ──────────────────────────────────────────────────────
+
+// PowerMonitor extends Device with continuous current/voltage streaming and
+// average/peak measurement for the F-11 (AFU IoT) high-precision meter.
+type PowerMonitor interface {
+	Device
+	GetState(ctx context.Context) (*MonitorState, error)
+	SetInterval(ctx context.Context, ms int) error
+	SetPrint(ctx context.Context, mode int) error
+	StartMonitor(ctx context.Context) error
+	StopMonitor(ctx context.Context) error
+	// SetSampleHandler registers a callback invoked on every decoded sample so
+	// the manager can push real-time updates to WebSocket clients.
+	SetSampleHandler(func(*MonitorState))
+}
+
+// MonitorState carries everything the UI needs to render a power monitor page.
+type MonitorState struct {
+	Connected bool `json:"connected"`
+	// Latest decoded sample
+	Current float64 `json:"current"` // A
+	Voltage float64 `json:"voltage"` // V
+	// Monitor (average/peak) mode
+	Monitoring  bool    `json:"monitoring"`
+	AvgCurrent  float64 `json:"avg_current"`
+	AvgVoltage  float64 `json:"avg_voltage"`
+	PeakCurrent float64 `json:"peak_current"`
+	PeakVoltage float64 `json:"peak_voltage"`
+	SampleCount int     `json:"sample_count"`
+	// Current sample interval in ms
+	IntervalMs int `json:"interval_ms"`
 }

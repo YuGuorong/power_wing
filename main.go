@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -47,6 +48,11 @@ import (
 var rawWebFS embed.FS
 
 func main() {
+	// Keep CLI output when launched from a terminal, and stay windowless when
+	// double-clicked (the binary is built with -H windowsgui).
+	setupWindowsStdio()
+	setupLogging()
+
 	// ── CLI flags ────────────────────────────────────────────────────────────
 	fHost := flag.String("host", "0.0.0.0", "HTTP server bind host")
 	fPort := flag.Int("port", 8765, "HTTP server port")
@@ -65,17 +71,21 @@ func main() {
 	fOutp := flag.String("outp", "", "Set output ON or OFF")
 	fOVP := flag.Float64("ovp", -1, "Set OVP limit (V)")
 	fOCP := flag.Float64("ocp", -1, "Set OCP limit (A)")
-	fUSBPort := flag.Int("usb-port", -1, "USB hub port number (1-4)")
+	fUSBPort := flag.Int("usb-port", -1, "USB hub port number (1-4, or 1-12 for SanGenXian)")
 	fUSBState := flag.String("usb-state", "", "USB port state: on|off")
 
 	// Info flags
 	fListPorts := flag.Bool("list-ports", false, "List available serial ports and exit")
 	fServer := flag.Bool("server", false, "Run as background server (spawn detached process, then CLI exits)")
+	fAutoConnect := flag.Bool("auto-connect", false, "Open all configured serial ports at startup (disabled by default for safety)")
 	fListDevices := flag.Bool("list-devices", false, "List configured devices and exit")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: powerwing [options]\n\nOptions:\n")
 		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nMCP is opt-in. To run MCP together with the Web UI and tray, use:\n")
+		fmt.Fprintf(os.Stderr, "  powerwing --mcp=true --mcp-transport tcp --mcp-host 0.0.0.0 --mcp-port 9876\n")
+		fmt.Fprintf(os.Stderr, "Do NOT use --mcp-only if you also want the Web UI and tray.\n")
 	}
 	flag.Parse()
 
@@ -104,9 +114,12 @@ func main() {
 
 	// ── Initialise manager ───────────────────────────────────────────────────
 	mgr := manager.New(cfg)
-	if *fMCPOnly || *fMCP {
-		// MCP mode: lazy start — register devices but don't auto-connect.
-		// Devices connect on-demand when AI calls send_command / reconnect_device.
+	// Default to lazy start in every mode: configured devices are registered
+	// but no serial port is opened until the user explicitly connects a device
+	// (web UI / HTTP) or sends a command to it.  This prevents stale COM
+	// assignments from grabbing ports that belong to other equipment.
+	// --auto-connect restores the old "open everything at startup" behaviour.
+	if *fMCPOnly || *fMCP || !*fAutoConnect {
 		if err := mgr.LazyStart(); err != nil {
 			log.Fatalf("manager lazy start: %v", err)
 		}
@@ -181,15 +194,23 @@ func main() {
 		}
 	}()
 
-	url := fmt.Sprintf("http://%s:%d", *fHost, *fPort)
+	url := fmt.Sprintf("http://%s", canonicalAddr(*fHost, *fPort))
 	if !*fNoBrowser {
 		openBrowser(url)
 	} else {
 		log.Println("PowerWing running at", url)
 	}
 
-	// System tray (Windows: real; others: no-op)
-	go tray.Run(mgr, *fHost, *fPort, appIcon)
+	// System tray (Windows: real; others: no-op).  The callback lets the tray
+	// Quit item stop the background process — there is no console to Ctrl+C
+	// when the app was launched by double-click.
+	trayQuit := make(chan struct{}, 1)
+	go tray.Run(mgr, *fHost, *fPort, appIcon, func() {
+		select {
+		case trayQuit <- struct{}{}:
+		default:
+		}
+	})
 
 	// Voice commands
 	if *fVoice {
@@ -198,11 +219,15 @@ func main() {
 		go voice.Listen(ctx, mgr)
 	}
 
-	// Wait for OS signal
+	// Wait for OS signal or the tray Quit item.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	<-sig
-	log.Println("Shutting down PowerWing…")
+	select {
+	case <-sig:
+		log.Println("Shutting down PowerWing…")
+	case <-trayQuit:
+		log.Println("Tray quit requested; shutting down…")
+	}
 	mgr.Stop()
 }
 
@@ -292,7 +317,9 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		// rundll32 is a GUI process: no console window flashes when the
+		// browser is launched from the tray or on startup.
+		cmd = exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", url)
 	case "darwin":
 		cmd = exec.Command("open", url)
 	default:
@@ -301,4 +328,15 @@ func openBrowser(url string) {
 	if err := cmd.Start(); err != nil {
 		log.Printf("open browser: %v (navigate manually to %s)", err, url)
 	}
+}
+
+// canonicalAddr returns a browser-reachable "host:port" for the given bind
+// host.  Wildcard bind addresses ("0.0.0.0", "::", "*") are not valid browser
+// destinations on Windows, so they are rewritten to loopback while the server
+// keeps listening on the wildcard.
+func canonicalAddr(host string, port int) string {
+	if host == "0.0.0.0" || host == "::" || host == "*" || host == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }

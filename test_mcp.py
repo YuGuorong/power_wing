@@ -126,18 +126,13 @@ def main():
         print("  [{}] {} ({}) [{}] @ {}".format(
             conn, dev["id"], dev["name"], dev["type"], dev["port"]))
 
-    # 4. Test connection - probe for SPM3051
-    print("\n[4/7] Test connection (spm3051)...")
+    # 4. Test connection - check configured SPM3051 devices
+    print("\n[4/8] Test connection (spm3051)...")
     data = tool_call(client, "powerwing_test_connection",
                      {"device_type": "spm3051"})
     for r in data["results"]:
-        if r.get("skipped"):
-            flag = "SKIP"
-        elif r["matched"]:
-            flag = "MATCH"
-        else:
-            flag = "NONE"
-        print("  {}: {}".format(r["port"], flag))
+        flag = "MATCH" if r["matched"] else "NONE"
+        print("  {} [{}]: {} ({})".format(r["port"], r["device_id"], flag, r.get("reason", "")))
 
     # 5. Get config
     print("\n[5/7] Get config...")
@@ -163,6 +158,12 @@ def main():
     print("\n[7/7] List serial ports...")
     data = tool_call(client, "powerwing_list_serial_ports")
     print("  Ports: {}".format(", ".join(data["ports"])))
+
+    # 8. Set config - single device (round-trip with get_config)
+    print("\n[8/8] Set config (PSU1, no-op update)...")
+    data = tool_call(client, "powerwing_set_config",
+                     {"device_id": "PSU1"})
+    print("  Status: {}, updated: {}".format(data["status"], data["updated"]))
 
     print("\n" + "=" * 60)
     print("  All tests passed")
