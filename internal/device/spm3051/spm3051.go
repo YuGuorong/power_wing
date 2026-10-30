@@ -21,6 +21,15 @@
 //	MEASure:ALL:INFO?           → "V,A,W,OVP,OCP,OTP,mode\r\n"
 //	                              e.g. "5.010,0.000,0.000,OFF,OFF,OFF,1"
 //	                              mode: 0 = standby, 1 = CV, 2 = CC, 3 = fault
+//	:CONFigure:ALL?             → "VOLT:DC,+0.0006V,AUTO,2V"
+//	                              built-in DMM: function, live reading+unit,
+//	                              auto/manual, range
+//	MULTimeter:HOLD?            → ON | OFF
+//	:<FUNC>:NULL?               → ON | OFF   (e.g. ":VOLT:DC:NULL?")
+//
+// DMM settings (function, range, HOLD, NULL) are written with the likely OWON
+// spellings and verified by reading the state back, because the public SP/SPE
+// manual does not document the SPM3051's multimeter command tree.
 //
 // Front-panel (remote-control) policy: opening the port and polling does NOT
 // lock the keys.  SYSTem:REMote is sent just before the first set command of a
@@ -72,6 +81,11 @@ const (
 
 	queryTerm = "\n"   // capture: "OUTP?\n", "MEASure:ALL:INFO?\n", ...
 	cmdTerm   = "\r\n" // capture: "OUTP ON\r\n", "VOLT 5.0\r\n", ...
+
+	// meterQuery reads the built-in multimeter; the reply carries the live
+	// reading: ":CONFigure:ALL?" → "VOLT:DC,+0.0006V,AUTO,2V".
+	meterQuery     = ":CONFigure:ALL?"
+	meterHoldQuery = "MULTimeter:HOLD?"
 )
 
 // Measurement mode values returned in the last MEASure:ALL:INFO? field.
@@ -105,6 +119,10 @@ type SPM3051 struct {
 	remoteMode   bool        // true while SYSTem:REMote is active (panel locked)
 	lastControl  time.Time   // last set command; drives remoteIdleRelease
 	releaseTimer *time.Timer // fires remoteIdleRelease after the last set command
+
+	// built-in multimeter (optional subsystem)
+	hasMeter bool
+	meter    *device.MeterState
 
 	// last good state, returned on a transient I/O error so the UI does not
 	// drop to zero for a single poll
@@ -241,6 +259,16 @@ func (s *SPM3051) initLocked() error {
 		return fmt.Errorf("device not responding (*IDN? and OUTP? both failed)")
 	}
 
+	// Probe the optional built-in multimeter once.  Detecting support here
+	// avoids a 300 ms timeout on every poll when the unit lacks it.
+	if m, err := s.queryMeter(); err == nil {
+		s.hasMeter = true
+		s.meter = m
+		log.Printf("[spm3051] %s: multimeter %s, range %s", s.id, m.Func, m.Range)
+	} else {
+		log.Printf("[spm3051] %s: multimeter not available: %v", s.id, err)
+	}
+
 	// Reading is done: hand the panel back.  Polling continues in local mode;
 	// the device only enters remote mode temporarily around control commands.
 	// This also clears a remote state left by a previous crashed session.
@@ -291,6 +319,27 @@ func (s *SPM3051) queryFloat(cmd string) (float64, bool) {
 		return 0, false
 	}
 	return parseFloat(resp)
+}
+
+// queryMeter reads the built-in multimeter value plus its hold/null flags.
+func (s *SPM3051) queryMeter() (*device.MeterState, error) {
+	resp, err := s.query(meterQuery)
+	if err != nil {
+		return nil, err
+	}
+	m, err := parseMeterReply(resp)
+	if err != nil {
+		return nil, err
+	}
+	if r, err := s.query(meterHoldQuery); err == nil {
+		m.Hold, _ = parseBool(r)
+	}
+	if q := meterNullQuery(m.Func); q != "" {
+		if r, err := s.query(q); err == nil {
+			m.Null, _ = parseBool(r)
+		}
+	}
+	return m, nil
 }
 
 // query sends a query command (LF-terminated) and returns the reply line.
@@ -559,6 +608,180 @@ func parseBool(s string) (value, ok bool) {
 	return false, false
 }
 
+// parseMeterReply decodes ":CONFigure:ALL?" replies, e.g.
+// "VOLT:DC,+0.0006V,AUTO,2V" → function, reading+unit, auto/manual, range.
+func parseMeterReply(resp string) (*device.MeterState, error) {
+	f := splitFields(resp)
+	if len(f) < 2 {
+		return nil, fmt.Errorf("unexpected meter reply %q", resp)
+	}
+	fn := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(f[0])), ":")
+	if !isMeterFunc(fn) {
+		return nil, fmt.Errorf("unknown meter function %q", f[0])
+	}
+	m := &device.MeterState{Func: fn}
+	if v, unit, err := splitNumberUnit(f[1]); err == nil {
+		m.Value = v
+		m.Unit = unit
+	} else {
+		// "OL" and friends: the meter exists, the reading is not numeric.
+		m.Overload = true
+	}
+	if m.Unit == "" {
+		m.Unit = defaultMeterUnit(fn)
+	}
+	if len(f) > 2 {
+		m.AutoRange = strings.EqualFold(f[2], "AUTO")
+	}
+	if len(f) > 3 {
+		m.Range = f[3]
+	}
+	return m, nil
+}
+
+// isMeterFunc reports whether fn names a supported DMM function.
+func isMeterFunc(fn string) bool {
+	for _, p := range []string{"VOLT", "CURR", "RES", "CAP", "FREQ", "PER", "DIOD", "CONT", "TEMP"} {
+		if strings.HasPrefix(fn, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitNumberUnit splits a reading such as "+0.0006V" or "-1.23e-2A" into its
+// numeric value and unit suffix.
+func splitNumberUnit(s string) (float64, string, error) {
+	s = strings.TrimSpace(s)
+	i := 0
+	for i < len(s) && isNumberChar(s[i]) {
+		i++
+	}
+	if i == 0 {
+		return 0, "", fmt.Errorf("no numeric prefix")
+	}
+	v, err := strconv.ParseFloat(s[:i], 64)
+	if err != nil {
+		return 0, "", err
+	}
+	return v, strings.TrimSpace(s[i:]), nil
+}
+
+func isNumberChar(c byte) bool {
+	return c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.' || c == 'e' || c == 'E'
+}
+
+// defaultMeterUnit supplies a unit when the reading has no suffix.
+func defaultMeterUnit(fn string) string {
+	switch {
+	case strings.HasPrefix(fn, "VOLT"), strings.HasPrefix(fn, "DIOD"):
+		return "V"
+	case strings.HasPrefix(fn, "CURR"):
+		return "A"
+	case strings.HasPrefix(fn, "RES"), strings.HasPrefix(fn, "CONT"):
+		return "Ω"
+	case strings.HasPrefix(fn, "CAP"):
+		return "F"
+	case strings.HasPrefix(fn, "FREQ"):
+		return "Hz"
+	case strings.HasPrefix(fn, "PER"):
+		return "s"
+	}
+	return ""
+}
+
+// meterFuncFamily maps a reported function such as "VOLT:DC" to its family.
+func meterFuncFamily(fn string) string {
+	fn = strings.ToUpper(strings.TrimSpace(fn))
+	for _, p := range []string{"FRES", "VOLT", "CURR", "RES", "CAP", "FREQ", "PER", "DIOD", "CONT", "TEMP"} {
+		if strings.HasPrefix(fn, p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// meterNullQuery returns the per-function NULL query (matches the capture's
+// ":VOLT:DC:NULL?"), or "" for functions without a relative mode.
+func meterNullQuery(fn string) string {
+	switch meterFuncFamily(fn) {
+	case "VOLT", "CURR", "RES", "FRES", "CAP", "FREQ":
+		return ":" + strings.ToUpper(strings.TrimSpace(fn)) + ":NULL?"
+	}
+	return ""
+}
+
+var meterFunctions = map[string]bool{
+	"VOLT:DC": true, "VOLT:AC": true,
+	"CURR:DC": true, "CURR:AC": true,
+	"RES": true, "FRES": true, "CAP": true,
+	"CONT": true, "DIOD": true, "FREQ": true, "PER": true,
+}
+
+// normalizeMeterFunction canonicalises a requested function mnemonic.
+func normalizeMeterFunction(fn string) (string, bool) {
+	fn = strings.ToUpper(strings.TrimSpace(fn))
+	return fn, meterFunctions[fn]
+}
+
+// meterFuncMatches reports whether a read-back function satisfies the request.
+func meterFuncMatches(requested, actual string) bool {
+	r := strings.ToUpper(strings.TrimSpace(requested))
+	a := strings.ToUpper(strings.TrimSpace(actual))
+	if r == a {
+		return true
+	}
+	// Some firmware reports just "VOLT"/"CURR" for the DC function.
+	return r == "VOLT:DC" && a == "VOLT" ||
+		r == "CURR:DC" && a == "CURR" ||
+		a == "VOLT:DC" && r == "VOLT" ||
+		a == "CURR:DC" && r == "CURR"
+}
+
+// rangeInBaseUnits converts a reported range ("200mV", "2V", "20kΩ") to base
+// units (V, A, Ω, F, Hz).
+func rangeInBaseUnits(s string) (float64, bool) {
+	v, unit, err := splitNumberUnit(s)
+	if err != nil {
+		return 0, false
+	}
+	mult := 1.0
+	switch {
+	case strings.HasPrefix(unit, "m"):
+		mult = 1e-3
+	case strings.HasPrefix(unit, "u"), strings.HasPrefix(unit, "µ"):
+		mult = 1e-6
+	case strings.HasPrefix(unit, "n"):
+		mult = 1e-9
+	case strings.HasPrefix(unit, "k"), strings.HasPrefix(unit, "K"):
+		mult = 1e3
+	case strings.HasPrefix(unit, "M"):
+		mult = 1e6
+	}
+	return v * mult, true
+}
+
+// meterManualRangeOK verifies a manual-range set: auto must be off and the
+// reported range must match (when it is parseable).
+func meterManualRangeOK(m *device.MeterState, want float64) bool {
+	if m.AutoRange {
+		return false
+	}
+	got, ok := rangeInBaseUnits(m.Range)
+	if !ok {
+		return true // accepted, but the reported range has an unknown format
+	}
+	diff := math.Abs(got - want)
+	return diff <= math.Abs(want)*1e-3 || diff < 1e-9
+}
+
+func boolDigit(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
 // ─── PowerSupply interface ────────────────────────────────────────────────────
 
 func (s *SPM3051) GetState(_ context.Context) (*device.PowerState, error) {
@@ -583,6 +806,13 @@ func (s *SPM3051) GetState(_ context.Context) (*device.PowerState, error) {
 	if out, err := s.query("OUTP?"); err == nil {
 		if on, ok := parseBool(out); ok {
 			s.outputOn = on
+		}
+	}
+
+	// Built-in multimeter readout (optional; never fails the poll).
+	if s.hasMeter {
+		if m, err := s.queryMeter(); err == nil {
+			s.meter = m
 		}
 	}
 
@@ -616,6 +846,10 @@ func (s *SPM3051) GetState(_ context.Context) (*device.PowerState, error) {
 		CVMode:       cvMode,
 		// exposed so the UI can offer "release control" only while locked
 		RemoteControl: s.remoteMode,
+	}
+	if s.meter != nil {
+		m := *s.meter
+		st.Meter = &m
 	}
 	s.last = st
 	return st, nil
@@ -681,4 +915,170 @@ func (s *SPM3051) SetOCP(_ context.Context, amps float64) error {
 	}
 	s.ocpLim = amps
 	return nil
+}
+
+// ─── built-in multimeter control ─────────────────────────────────────────────
+//
+// The SPM3051's DMM command set is not documented in the public SP/SPE manual;
+// the only verified forms come from the USB capture (:CONFigure:ALL?,
+// MULTimeter:HOLD?, :VOLT:DC:NULL?).  Each setting therefore tries the likely
+// SCPI spellings from OWON's DMM family and keeps the first one that the
+// read-back confirms.
+
+// meterFuncLocked returns the current function, reading it if necessary.
+// Must be called with s.mu held.
+func (s *SPM3051) meterFuncLocked() (string, error) {
+	if !s.hasMeter {
+		return "", fmt.Errorf("spm3051 %s: no built-in multimeter", s.id)
+	}
+	if s.meter != nil && s.meter.Func != "" {
+		return s.meter.Func, nil
+	}
+	m, err := s.queryMeter()
+	if err != nil {
+		return "", fmt.Errorf("spm3051 %s: read meter: %w", s.id, err)
+	}
+	s.meter = m
+	return m.Func, nil
+}
+
+// applyMeterLocked writes each candidate until the read-back state satisfies
+// ok.  Remote control is taken only for this operation and released again by
+// the normal idle timer.
+func (s *SPM3051) applyMeterLocked(candidates []string, ok func(*device.MeterState) bool) error {
+	if !s.connected {
+		return fmt.Errorf("spm3051 %s: not connected", s.id)
+	}
+	if err := s.ensureRemoteLocked(); err != nil {
+		return err
+	}
+	for _, cmd := range candidates {
+		if err := s.write(cmd); err != nil {
+			return fmt.Errorf("spm3051 %s: %q: %w", s.id, cmd, err)
+		}
+		s.lastControl = time.Now()
+		s.armReleaseLocked()
+
+		m, err := s.queryMeter()
+		if err != nil {
+			continue
+		}
+		s.meter = m
+		if ok(m) {
+			return nil
+		}
+	}
+	return fmt.Errorf("spm3051 %s: meter did not accept %q", s.id, candidates[0])
+}
+
+// SetMeterFunction switches the DMM measurement function, e.g. "VOLT:DC",
+// "VOLT:AC", "CURR:DC", "CURR:AC", "RES", "FRES", "CAP", "CONT", "DIOD",
+// "FREQ" or "PER".
+func (s *SPM3051) SetMeterFunction(_ context.Context, function string) error {
+	fn, ok := normalizeMeterFunction(function)
+	if !ok {
+		return fmt.Errorf("spm3051 %s: unsupported meter function %q", s.id, function)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasMeter {
+		return fmt.Errorf("spm3051 %s: no built-in multimeter", s.id)
+	}
+	return s.applyMeterLocked(
+		[]string{
+			"CONFigure:" + fn,
+			`FUNCtion "` + fn + `"`,
+			`SENSe:FUNCtion "` + fn + `"`,
+		},
+		func(m *device.MeterState) bool { return meterFuncMatches(fn, m.Func) },
+	)
+}
+
+// SetMeterAutoRange turns auto-ranging on or off.
+func (s *SPM3051) SetMeterAutoRange(_ context.Context, auto bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn, err := s.meterFuncLocked()
+	if err != nil {
+		return err
+	}
+	arg := "OFF"
+	if auto {
+		arg = "ON"
+	}
+	return s.applyMeterLocked(
+		[]string{
+			fn + ":RANGE:AUTO " + arg,
+			"SENSe:" + fn + ":RANGE:AUTO " + arg,
+			fn + ":AUTO " + arg,
+		},
+		func(m *device.MeterState) bool { return m.AutoRange == auto },
+	)
+}
+
+// SetMeterRange selects a manual range for the current function.  value is in
+// base units (V, A, Ω, F, Hz); the reply may report a prefixed form (e.g.
+// "200mV").
+func (s *SPM3051) SetMeterRange(_ context.Context, value float64) error {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return fmt.Errorf("spm3051: meter range must be a positive number (got %v)", value)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn, err := s.meterFuncLocked()
+	if err != nil {
+		return err
+	}
+	arg := strconv.FormatFloat(value, 'g', -1, 64)
+	return s.applyMeterLocked(
+		[]string{
+			fn + ":RANGE " + arg,
+			"SENSe:" + fn + ":RANGE " + arg,
+			"CONFigure:" + fn + " " + arg,
+		},
+		func(m *device.MeterState) bool { return meterManualRangeOK(m, value) },
+	)
+}
+
+// SetMeterHold freezes or unfreezes the displayed reading.
+func (s *SPM3051) SetMeterHold(_ context.Context, hold bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasMeter {
+		return fmt.Errorf("spm3051 %s: no built-in multimeter", s.id)
+	}
+	arg := "OFF"
+	if hold {
+		arg = "ON"
+	}
+	return s.applyMeterLocked(
+		[]string{"MULTimeter:HOLD " + arg, "MULTimeter:HOLD " + boolDigit(hold)},
+		func(m *device.MeterState) bool { return m.Hold == hold },
+	)
+}
+
+// SetMeterNull enables or disables relative (NULL) measurements for the
+// current function.
+func (s *SPM3051) SetMeterNull(_ context.Context, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn, err := s.meterFuncLocked()
+	if err != nil {
+		return err
+	}
+	if meterNullQuery(fn) == "" {
+		return fmt.Errorf("spm3051 %s: NULL is not supported for %s", s.id, fn)
+	}
+	arg := "OFF"
+	if enabled {
+		arg = "ON"
+	}
+	return s.applyMeterLocked(
+		[]string{
+			":" + fn + ":NULL " + arg,
+			"SENSe:" + fn + ":NULL " + arg,
+			":" + fn + ":NULL " + boolDigit(enabled),
+		},
+		func(m *device.MeterState) bool { return m.Null == enabled },
+	)
 }

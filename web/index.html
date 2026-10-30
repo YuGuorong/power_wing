@@ -244,6 +244,54 @@
             </div>
           </div>
         </details>
+
+        <!-- Built-in multimeter (SPM3051) -->
+        <div class="dmm-panel hidden">
+          <div class="dmm-head">
+            <span class="dmm-title">Multimeter</span>
+            <span class="dmm-meta">—</span>
+          </div>
+          <div class="dmm-body">
+            <div class="dmm-reading-wrap">
+              <span class="dmm-reading">—</span>
+              <span class="dmm-reading-unit"></span>
+            </div>
+            <div class="dmm-controls">
+              <label class="dmm-field">
+                <span>FUNCTION</span>
+                <select class="dmm-func">
+                  <option value="VOLT:DC">DC Voltage</option>
+                  <option value="VOLT:AC">AC Voltage</option>
+                  <option value="CURR:DC">DC Current</option>
+                  <option value="CURR:AC">AC Current</option>
+                  <option value="RES">Resistance 2W</option>
+                  <option value="FRES">Resistance 4W</option>
+                  <option value="CAP">Capacitance</option>
+                  <option value="CONT">Continuity</option>
+                  <option value="DIOD">Diode</option>
+                  <option value="FREQ">Frequency</option>
+                  <option value="PER">Period</option>
+                </select>
+              </label>
+              <div class="dmm-field">
+                <span>RANGE</span>
+                <div class="dmm-inline">
+                  <button class="dmm-btn dmm-auto" title="Toggle auto range">AUTO</button>
+                  <input class="dmm-range-input" type="number" step="any" min="0"
+                         placeholder="e.g. 2" title="Manual range in base units (V, A, Ω, F, Hz)">
+                  <button class="dmm-btn dmm-range-set" title="Apply manual range">SET</button>
+                </div>
+              </div>
+              <div class="dmm-field">
+                <span>MODE</span>
+                <div class="dmm-inline">
+                  <button class="dmm-btn dmm-hold" title="Freeze the reading">HOLD</button>
+                  <button class="dmm-btn dmm-null" title="Relative (NULL) measurement">NULL</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -582,6 +630,8 @@
     </div>
   </div>
 </template>
+
+<div id="toast" class="toast hidden"></div>
 
 <script src="app.js"></script>
 </body>

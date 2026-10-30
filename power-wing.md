@@ -9,17 +9,18 @@
 3. **Extensible** — Plug-in architecture supports variant equipment via USB/HID/UART
 4. **Voice Commands** — PC microphone/speaker voice control (Windows only)
 5. **Command Line** — Full CLI control for scripting and automation
-6. **MCP Server** — AI agent integration via Model Context Protocol (stdio + TCP)
-7. **Per-Device UI** — Individual pages for each power supply or hub
-8. **System Tray** — Quick access from system tray (Windows only)
-9. **Auto-Config** — Configuration auto-saved to platform-specific user config dir
-10. **Serial Port Debug** — Settings panel showing every serial open/close with owner, baud and caller
-11. **Windowless Background Mode** — Double-click `power_wing.exe` to run in the system tray without a console window
-12. **All Ports ON/OFF** — One-click master switches in every hub panel and `all-on` / `all-off` REST endpoints
+6. **MCP Server** — AI agent integration via Model Context Protocol (stdio + TCP + Streamable HTTP)
+7. **REST API** — Full device/state/command API at `/api/...` (see [docs/api_reference.md](docs/api_reference.md))
+8. **Per-Device UI** — Individual pages for each power supply or hub
+9. **System Tray** — Quick access from system tray (Windows only)
+10. **Auto-Config** — Configuration auto-saved to platform-specific user config dir
+11. **Serial Port Debug** — Settings panel showing every serial open/close with owner, baud and caller
+12. **Windowless Background Mode** — Double-click `power_wing.exe` to run in the system tray without a console window
+13. **All Ports ON/OFF** — One-click master switches in every hub panel and `all-on` / `all-off` REST endpoints
 
 ## Supported Hardware
 
-- **SPM3051** — UART lab power supply (9600 baud, SCPI protocol) — see [SPM3051-CMD.txt](SPM3051-CMD.txt)
+- **SPM3051** — UART lab power supply with built-in 4½-digit multimeter (9600 baud, SCPI protocol) — see [docs/api_spm3051.md](docs/api_spm3051.md) and [SPM3051-CMD.txt](SPM3051-CMD.txt)
 - **PD_Pocket** — UART programmable PSU (115200 baud) — see [PD_Pocket API.txt](PD_Pocket%20API.txt)
 - **USB-Slim** — UART USB hub 4-port controller (9600 baud) — see [Usb-slim-api.txt](Usb-slim-api.txt)
 - **SanGenXian** — UART USB hub 12-port controller (4800 baud) — see [docs/api_sangenxian.md](docs/api_sangenxian.md)
@@ -46,6 +47,8 @@ Every open attempt, failure and close is recorded (owner, port, baud, source fil
 - Get/set OCP/OVP protection limits
 - Mouse-free number entry for voltage/current
 - Real-time state monitoring
+- Built-in multimeter (SPM3051): live reading, function/range selection, HOLD and NULL — see [docs/api_spm3051.md](docs/api_spm3051.md)
+- Front-panel release: the panel is only locked while a setting is being applied (SPM3051)
 
 ## Building
 
@@ -129,7 +132,11 @@ Serial port names:
 
 ## MCP Server Support (for AI Calling)
 
-PowerWing includes a Model Context Protocol (MCP) server with both **stdio** (local) and **TCP** (network) transports.
+PowerWing includes a Model Context Protocol (MCP) server with **stdio** (local),
+**TCP** (network) and **Streamable HTTP** (`POST /mcp` on the web server) transports.
+
+A complete reference for REST, WebSocket, MCP tools, device commands and state
+objects is in [docs/api_reference.md](docs/api_reference.md).
 
 ### MCP Transports
 
@@ -186,12 +193,12 @@ All tools work on both Windows and Linux:
 
 - **powerwing_list_devices** — List all configured devices with connection status
 - **powerwing_get_device_state** — Get current measured values and settings
-- **powerwing_send_command** — Execute device command (set_volt, set_outp, set_usb_port, etc.)
+- **powerwing_send_command** — Execute device command (set_volt, set_outp, set_usb_port, release_control, meter_set_*, etc. — see [docs/api_reference.md §4](docs/api_reference.md#4-device-commands))
 - **powerwing_list_serial_ports** — Enumerate available serial ports
 - **powerwing_disconnect_device** — Disconnect device (manual mode)
 - **powerwing_reconnect_device** — Reconnect device with optional new port/baud
 - **powerwing_rename_device** — Change device display name
-- **powerwing_test_connection** — Check whether configured devices of a type respond on their configured ports (never opens non-configured ports)
+- **powerwing_test_connection** — Check whether configured devices of a type (spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz) respond on their configured ports (never opens non-configured ports)
 - **powerwing_get_config** — Return the full current configuration (all devices, server port, feature flags)
 - **powerwing_set_config** — Set configuration (counterpart of get_config): pass the full `devices` list, or `device_id` + optional name/port/baud/enabled to update one device; omitted fields keep current values. Use with `powerwing_list_serial_ports` to assign ports.
 

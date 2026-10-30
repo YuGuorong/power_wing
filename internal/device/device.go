@@ -55,9 +55,34 @@ type PowerState struct {
 	// device's keys/knob are locked).  Devices without local/remote switching
 	// leave it false.
 	RemoteControl bool `json:"remote_control"`
+	// Meter is the built-in multimeter readout, when the device has one.
+	Meter *MeterState `json:"meter,omitempty"`
 	// Optional extras
 	Temperature float64 `json:"temperature,omitempty"`
 	InputVolt   float64 `json:"input_volt,omitempty"`
+}
+
+// MeterState is an optional built-in multimeter readout (e.g. SPM3051).
+type MeterState struct {
+	Func      string  `json:"func"`               // measurement function, e.g. "VOLT:DC"
+	Value     float64 `json:"value"`              // reading in Unit
+	Unit      string  `json:"unit"`               // unit suffix from the reply, e.g. "V"
+	Range     string  `json:"range,omitempty"`    // range as reported, e.g. "2V"
+	AutoRange bool    `json:"auto_range"`         // true when the reply says AUTO
+	Hold      bool    `json:"hold"`               // reading hold is active
+	Null      bool    `json:"null"`               // relative (NULL) measurement is active
+	Overload  bool    `json:"overload,omitempty"` // reading was not numeric, e.g. "OL"
+}
+
+// MeterController is implemented by power supplies with a built-in multimeter.
+// Drivers may probe several SCPI spellings per setting and confirm the result
+// by reading the state back.
+type MeterController interface {
+	SetMeterFunction(ctx context.Context, function string) error
+	SetMeterAutoRange(ctx context.Context, auto bool) error
+	SetMeterRange(ctx context.Context, value float64) error
+	SetMeterHold(ctx context.Context, hold bool) error
+	SetMeterNull(ctx context.Context, enabled bool) error
 }
 
 // ControlReleaser is implemented by power supplies that can lock their local

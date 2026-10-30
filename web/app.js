@@ -26,6 +26,17 @@ function sendCmd(deviceId, command, params) {
   ws.send(JSON.stringify({ type: 'cmd', device_id: deviceId, command, params }));
 }
 
+/** Show a transient error message (e.g. a device rejected a command). */
+let _toastTimer = null;
+function showToast(text) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove('hidden');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.add('hidden'), 6000);
+}
+
 /**
  * Returns a debounced version of fn that fires only after `delay` ms of silence.
  * Each call with the same key cancels the previous pending call.
@@ -200,6 +211,39 @@ function buildPsuPage(el, d) {
     });
   }
 
+  // Built-in multimeter controls (only rendered by devices that report a meter).
+  const dmmFn = $('.dmm-func', el);
+  if (dmmFn) {
+    dmmFn.addEventListener('change', () => sendCmd(d.id, 'meter_set_function', { value: dmmFn.value }));
+  }
+  const dmmAuto = $('.dmm-auto', el);
+  if (dmmAuto) {
+    dmmAuto.addEventListener('click', () => {
+      sendCmd(d.id, 'meter_set_auto', { on: !dmmAuto.classList.contains('active') });
+    });
+  }
+  const dmmRangeInput = $('.dmm-range-input', el);
+  const dmmRangeSet = $('.dmm-range-set', el);
+  if (dmmRangeInput && dmmRangeSet) {
+    dmmRangeSet.addEventListener('click', () => {
+      const v = parseFloat(dmmRangeInput.value);
+      if (!Number.isFinite(v) || v <= 0) return;
+      sendCmd(d.id, 'meter_set_range', { value: v });
+    });
+  }
+  const dmmHold = $('.dmm-hold', el);
+  if (dmmHold) {
+    dmmHold.addEventListener('click', () => {
+      sendCmd(d.id, 'meter_set_hold', { on: !dmmHold.classList.contains('active') });
+    });
+  }
+  const dmmNull = $('.dmm-null', el);
+  if (dmmNull) {
+    dmmNull.addEventListener('click', () => {
+      sendCmd(d.id, 'meter_set_null', { on: !dmmNull.classList.contains('active') });
+    });
+  }
+
   // Optimistic meas-row update: reflect new voltage/current in the measurement
   // display immediately when the user moves a control, without waiting for the
   // next server push.  Only volt and curr have a corresponding meas display.
@@ -363,6 +407,38 @@ function updatePsuPage(el, s) {
   // Temperature
   const tEl = $('.temp-value', el);
   if (tEl) tEl.textContent = s.temperature > 0 ? `${s.temperature.toFixed(1)}°C` : '—';
+
+  // Built-in multimeter (SPM3051); hidden when the device has none.
+  const dmm = $('.dmm-panel', el);
+  if (dmm) {
+    const m = s.meter;
+    dmm.classList.toggle('hidden', !m);
+    if (m) {
+      const av = Math.abs(m.value);
+      const dec = m.overload ? 0 : av === 0 ? 3 : av < 0.001 ? 6 : av < 1 ? 4 : 3;
+      $('.dmm-reading', dmm).textContent = m.overload ? 'OL' : m.value.toFixed(dec);
+      $('.dmm-reading-unit', dmm).textContent = m.overload ? '' : (m.unit || '');
+      $('.dmm-meta', dmm).textContent =
+        [m.func, m.auto_range ? 'AUTO' : 'MANUAL', m.range].filter(Boolean).join(' · ');
+
+      const fnSel = $('.dmm-func', dmm);
+      if (fnSel && document.activeElement !== fnSel) fnSel.value = m.func;
+
+      const autoBtn = $('.dmm-auto', dmm);
+      if (autoBtn) autoBtn.classList.toggle('active', !!m.auto_range);
+      const holdBtn = $('.dmm-hold', dmm);
+      if (holdBtn) holdBtn.classList.toggle('active', !!m.hold);
+      const nullBtn = $('.dmm-null', dmm);
+      if (nullBtn) nullBtn.classList.toggle('active', !!m.null);
+
+      const rangeInput = $('.dmm-range-input', dmm);
+      const rangeSet = $('.dmm-range-set', dmm);
+      if (rangeInput && rangeSet) {
+        rangeInput.disabled = !!m.auto_range;
+        rangeSet.disabled = !!m.auto_range;
+      }
+    }
+  }
 
   // Set-point spinboxes (only update if user is not interacting)
   setSpinboxIfIdle($('.spinbox[data-cmd="set_volt"]', el), s.volt_set, 2);
@@ -901,6 +977,7 @@ function handleServerMsg(msg) {
 
     case 'error':
       console.warn('[ws] error:', msg.message);
+      showToast(msg.message);
       break;
   }
 }

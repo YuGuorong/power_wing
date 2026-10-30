@@ -2,14 +2,14 @@
     "FixedFileInfo":  {
                           "FileVersion":  {
                                               "Major":  1,
-                                              "Minor":  1,
-                                              "Patch":  7,
+                                              "Minor":  2,
+                                              "Patch":  0,
                                               "Build":  0
                                           },
                           "ProductVersion":  {
                                                  "Major":  1,
-                                                 "Minor":  1,
-                                                 "Patch":  7,
+                                                 "Minor":  2,
+                                                 "Patch":  0,
                                                  "Build":  0
                                              },
                           "FileFlagsMask":  "3f",
@@ -22,14 +22,14 @@
                            "Comments":  "",
                            "CompanyName":  "",
                            "FileDescription":  "PowerWing 闂?Power Supply \u0026 USB Hub Controller",
-                           "FileVersion":  "1.1.7.0",
+                           "FileVersion":  "1.2.0.0",
                            "InternalName":  "power_wing",
                            "LegalCopyright":  "",
                            "LegalTrademarks":  "",
                            "OriginalFilename":  "power_wing.exe",
                            "PrivateBuild":  "",
                            "ProductName":  "PowerWing",
-                           "ProductVersion":  "1.1.7.0",
+                           "ProductVersion":  "1.2.0.0",
                            "SpecialBuild":  ""
                        },
     "VarFileInfo":  {

@@ -110,7 +110,16 @@ curl http://localhost:8765/api/device/psu1/state
   "ocp_triggered":  false,
   "otp_triggered":  false,
   "cv_mode":        true,
-  "remote_control": true
+  "remote_control": true,
+  "meter": {
+    "func": "VOLT:DC",
+    "value": 0.0006,
+    "unit": "V",
+    "range": "2V",
+    "auto_range": true,
+    "hold": false,
+    "null": false
+  }
 }
 ```
 
@@ -130,6 +139,7 @@ curl http://localhost:8765/api/device/psu1/state
 | `otp_triggered`  | bool   | Over-temperature protection tripped        |
 | `cv_mode`        | bool   | `true` = CV mode, `false` = CC mode        |
 | `remote_control` | bool   | `true` while the PC holds front-panel control (keys/knob locked) |
+| `meter`          | object | Built-in multimeter readout (`func`, `value`, `unit`, `range`, `auto_range`, `overload`); absent when the device has no meter |
 
 ---
 
@@ -258,6 +268,92 @@ Only devices that support local/remote switching accept this command
 
 ---
 
+## Multimeter Commands
+
+The SPM3051 has a built-in 4½-digit multimeter.  Its reading is exposed as
+`state.meter` (see above) and updated with every poll.  These commands control
+it through the generic `/cmd` endpoint; the web UI's **Multimeter** panel uses
+them.
+
+### meter_set_function
+
+Select the measurement function.
+
+| Param   | Type   | Required | Description |
+|---------|--------|----------|-------------|
+| `value` | string | yes      | `VOLT:DC`, `VOLT:AC`, `CURR:DC`, `CURR:AC`, `RES`, `FRES`, `CAP`, `CONT`, `DIOD`, `FREQ` or `PER` |
+
+```bash
+curl -X POST http://localhost:8765/api/device/psu1/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"command":"meter_set_function","params":{"value":"VOLT:DC"}}'
+```
+
+### meter_set_auto
+
+Enable or disable auto-ranging.
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `on`  | bool | yes      | `true` = AUTO, `false` = manual range |
+
+```bash
+curl -X POST http://localhost:8765/api/device/psu1/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"command":"meter_set_auto","params":{"on":true}}'
+```
+
+### meter_set_range
+
+Select a manual range (auto-ranging is turned off).
+
+| Param   | Type  | Required | Description |
+|---------|-------|----------|-------------|
+| `value` | float | yes      | Range in base units (V, A, Ω, F, Hz), e.g. `2` for 2 V |
+
+```bash
+curl -X POST http://localhost:8765/api/device/psu1/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"command":"meter_set_range","params":{"value":2}}'
+```
+
+### meter_set_hold
+
+Freeze / unfreeze the displayed reading (`MULTimeter:HOLD`).
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `on`  | bool | yes      | `true` = HOLD |
+
+```bash
+curl -X POST http://localhost:8765/api/device/psu1/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"command":"meter_set_hold","params":{"on":true}}'
+```
+
+### meter_set_null
+
+Enable/disable relative (NULL) measurement for the current function
+(`:<FUNC>:NULL`, e.g. `:VOLT:DC:NULL`).
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `on`  | bool | yes      | `true` = relative measurement |
+
+```bash
+curl -X POST http://localhost:8765/api/device/psu1/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"command":"meter_set_null","params":{"on":true}}'
+```
+
+> The public OWON SP/SPE manual does not document the SPM3051's DMM command
+> tree, so the driver tries the likely OWON spellings for each setting
+> (`CONFigure:<func>` / `FUNCtion "<func>"`, `<func>:RANGE[:AUTO]`,
+> `MULTimeter:HOLD`, `:<func>:NULL`) and keeps the first one whose read-back
+> confirms the change.  If none works the command returns an error.
+
+---
+
 ## Lifecycle Endpoints
 
 ### Reconnect Device
@@ -356,6 +452,11 @@ powerwing --device psu1 --ocp 1.5
   The next set command re-enters remote mode automatically.
 - Measurements keep updating while the PSU is in local mode; front-panel changes
   to the output state or set-points are picked up by the poll loop.
+- **Built-in multimeter.** When the unit reports one, `:CONFigure:ALL?` plus
+  `MULTimeter:HOLD?` and `:<FUNC>:NULL?` are polled on every tick.  The
+  `:CONFigure:ALL?` reply `VOLT:DC,+0.0006V,AUTO,2V` is exposed as
+  `state.meter` (function, live reading, unit, auto/manual, range, hold, null).
+  A non-numeric reading such as `OL` sets `meter.overload = true`.
 - State is polled every 1 second via `MEASure:ALL:INFO?`, which returns
   `V,A,W,OVP_trig,OCP_trig,OTP_trig,mode` (mode: `0` standby, `1` CV, `2` CC,
   `3` fault).  `OUTP?` is polled on every tick because output state is not part

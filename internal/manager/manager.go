@@ -982,6 +982,82 @@ func (m *Manager) execCmd(req CmdRequest) error {
 		go m.pollDevice(req.DeviceID)
 		return nil
 
+	// ── built-in multimeter ───────────────────────────────────────────────────
+	case "meter_set_function":
+		mc, ok := dev.(device.MeterController)
+		if !ok {
+			return fmt.Errorf("%s has no built-in multimeter", req.DeviceID)
+		}
+		fn, err := stringParam(req.Params, "value")
+		if err != nil {
+			return err
+		}
+		if err := mc.SetMeterFunction(ctx, fn); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "meter_set_auto":
+		mc, ok := dev.(device.MeterController)
+		if !ok {
+			return fmt.Errorf("%s has no built-in multimeter", req.DeviceID)
+		}
+		on, err := boolParam(req.Params, "on")
+		if err != nil {
+			return err
+		}
+		if err := mc.SetMeterAutoRange(ctx, on); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "meter_set_range":
+		mc, ok := dev.(device.MeterController)
+		if !ok {
+			return fmt.Errorf("%s has no built-in multimeter", req.DeviceID)
+		}
+		v, err := floatParam(req.Params, "value")
+		if err != nil {
+			return err
+		}
+		if err := mc.SetMeterRange(ctx, v); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "meter_set_hold":
+		mc, ok := dev.(device.MeterController)
+		if !ok {
+			return fmt.Errorf("%s has no built-in multimeter", req.DeviceID)
+		}
+		on, err := boolParam(req.Params, "on")
+		if err != nil {
+			return err
+		}
+		if err := mc.SetMeterHold(ctx, on); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "meter_set_null":
+		mc, ok := dev.(device.MeterController)
+		if !ok {
+			return fmt.Errorf("%s has no built-in multimeter", req.DeviceID)
+		}
+		on, err := boolParam(req.Params, "on")
+		if err != nil {
+			return err
+		}
+		if err := mc.SetMeterNull(ctx, on); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
 	// ── USB hub ───────────────────────────────────────────────────────────────
 	case "set_usb_port":
 		hub, ok := dev.(device.USBHub)

@@ -40,6 +40,7 @@ New-Item -ItemType Directory -Path $Staging -Force | Out-Null
 Copy-Item "power_wing.exe"           $Staging
 Copy-Item "power_wing_linux_amd64"   $Staging
 Copy-Item "power-wing.md"            $Staging
+Copy-Item "docs"                     $Staging -Recurse
 Copy-Item "app.ico"                  $Staging
 
 # ── 4. Write a README for end users ─────────────────────────────────────────
@@ -54,6 +55,7 @@ PACKAGE CONTENTS
 - power_wing.exe           Windows executable
 - power_wing_linux_amd64   Linux amd64 executable
 - power-wing.md            Full documentation
+- docs\                    REST/WebSocket/MCP API reference and per-device notes
 - app.ico                  Application icon
 - README.txt               This file
 
@@ -123,7 +125,10 @@ STDIO (local AI agents):
 
 TCP (network AI agents, LAN):
   ./power_wing_linux_amd64 --mcp-only --mcp-transport tcp --mcp-host 0.0.0.0 --mcp-port 9876
-  Then connect client to: http://<host>:9876
+  Then connect the client to: tcp://<host>:9876
+
+Streamable HTTP (available whenever the web server runs):
+  POST http://<host>:8765/mcp
 
 MCP TOOLS AVAILABLE
 -------------------
@@ -134,15 +139,22 @@ MCP TOOLS AVAILABLE
 - powerwing_disconnect_device  Disconnect a device
 - powerwing_reconnect_device   Reconnect or reconfigure device
 - powerwing_rename_device      Rename device for UI display
+- powerwing_test_connection    Probe configured devices of a type
+- powerwing_get_config         Read the full configuration
+- powerwing_set_config         Replace config or update one device
+
+See docs\api_reference.md for every REST endpoint, WebSocket message,
+device command and state field.
 
 SUPPORTED HARDWARE
 ------------------
-- SPM3051          UART-based lab power supply (SCPI protocol)
+- SPM3051          UART lab power supply with built-in multimeter (9600 baud)
 - PD_Pocket        UART-based programmable power supply (115200 baud)
 - USB-Slim         UART-based 4-port USB hub (9600 baud)
 - SanGenXian       UART-based 12-port USB hub (4800 baud)
 - USB Alarm Light  7-color Modbus RTU alarm light (4800 baud)
 - F-11             AFU IoT power monitor (38400 baud)
+- POWER-Z          ChargerLAB KM002C/KM003C USB power meter (CDC port)
 
 CONFIGURATION
 -------------

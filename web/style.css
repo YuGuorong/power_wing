@@ -250,6 +250,51 @@ html, body {
 .temp-row { display: flex; gap: 4px; font-size: 12px; color: var(--text-dim); }
 .temp-value { color: var(--text); font-family: var(--digit-font); }
 
+/* ── Built-in multimeter ─────────────────────────────────────────────────── */
+.dmm-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.dmm-head { display: flex; align-items: baseline; gap: 10px; }
+.dmm-title {
+  font-size: 11px; font-weight: 700; letter-spacing: .12em;
+  color: var(--text-dim); text-transform: uppercase;
+}
+.dmm-meta { font-size: 11px; color: var(--text-dim); }
+.dmm-body { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+.dmm-reading-wrap { display: flex; align-items: baseline; gap: 6px; min-width: 220px; }
+.dmm-reading {
+  font-family: var(--digit-font); font-size: 34px; line-height: 1;
+  color: var(--accent);
+}
+.dmm-reading-unit { font-size: 16px; color: var(--text-dim); }
+.dmm-controls { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.dmm-field {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 10px; letter-spacing: .08em; color: var(--text-dim);
+}
+.dmm-inline { display: flex; align-items: center; gap: 6px; }
+.dmm-field select,
+.dmm-range-input {
+  background: var(--surface2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 8px; font-size: 12px;
+}
+.dmm-range-input { width: 80px; }
+.dmm-btn {
+  padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;
+  background: var(--surface2); color: var(--text-dim);
+  border: 1px solid var(--border); cursor: pointer; transition: all .15s;
+}
+.dmm-btn:hover { color: var(--text); border-color: var(--text-dim); }
+.dmm-btn.active {
+  background: rgba(34,211,238,.15); color: var(--accent); border-color: var(--accent);
+}
+.dmm-btn:disabled { opacity: .45; cursor: default; }
+
 /* ── Set controls ─────────────────────────────────────────────────────────── */
 .set-row {
   display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
@@ -640,6 +685,15 @@ html, body {
 .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
 
 .hidden { display: none !important; }
+
+/* ── Transient error toast ───────────────────────────────────────────────── */
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  max-width: min(680px, 92vw);
+  background: rgba(220,38,38,.96); color: #fff;
+  padding: 10px 16px; border-radius: 8px; font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.35); z-index: 9999;
+}
 
 /* ── Port configuration panel ─────────────────────────────────────────────── */
 .port-cfg-panel {

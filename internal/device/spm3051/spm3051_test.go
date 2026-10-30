@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yuguorong/power_wing/internal/device"
 	"go.bug.st/serial"
 )
 
@@ -188,7 +189,10 @@ func TestInitReadsThenReleasesToLocal(t *testing.T) {
 			"4.900\r\n" + // CURR?
 			"9.000\r\n" + // VOLT:LIM?
 			"5.000\r\n" + // CURR:LIM?
-			"ON\r\n", // OUTP?
+			"ON\r\n" + // OUTP?
+			"VOLT:DC,+0.0006V,AUTO,2V\r\n" + // :CONFigure:ALL?
+			"OFF\r\n" + // MULTimeter:HOLD?
+			"OFF\r\n", // :VOLT:DC:NULL?
 	)}
 	s := newTestDevice(f)
 	s.remoteMode = true
@@ -198,6 +202,7 @@ func TestInitReadsThenReleasesToLocal(t *testing.T) {
 	}
 	want := []string{
 		"*IDN?\n", "VOLT?\n", "CURR?\n", "VOLT:LIM?\n", "CURR:LIM?\n", "OUTP?\n",
+		":CONFigure:ALL?\n", "MULTimeter:HOLD?\n", ":VOLT:DC:NULL?\n",
 		"SYSTem:LOCal\r\n",
 	}
 	if got := f.written(); !slices.Equal(got, want) {
@@ -211,6 +216,199 @@ func TestInitReadsThenReleasesToLocal(t *testing.T) {
 	}
 	if !s.outputOn {
 		t.Fatal("outputOn = false, OUTP? replied ON")
+	}
+	if !s.hasMeter || s.meter == nil {
+		t.Fatal("multimeter not detected")
+	}
+	if s.meter.Value != 0.0006 || s.meter.Unit != "V" || !s.meter.AutoRange || s.meter.Range != "2V" {
+		t.Fatalf("meter = %+v", s.meter)
+	}
+}
+
+func TestParseMeterReply(t *testing.T) {
+	m, err := parseMeterReply("VOLT:DC,+0.0006V,AUTO,2V")
+	if err != nil {
+		t.Fatalf("parseMeterReply: %v", err)
+	}
+	if m.Func != "VOLT:DC" || m.Value != 0.0006 || m.Unit != "V" || !m.AutoRange || m.Range != "2V" {
+		t.Fatalf("meter = %+v", m)
+	}
+
+	m, err = parseMeterReply("CURR:DC,-1.2345A,MAN,10A")
+	if err != nil {
+		t.Fatalf("parseMeterReply: %v", err)
+	}
+	if m.Func != "CURR:DC" || m.Value != -1.2345 || m.Unit != "A" || m.AutoRange || m.Range != "10A" {
+		t.Fatalf("meter = %+v", m)
+	}
+
+	// Over-range readings still identify the meter.
+	m, err = parseMeterReply("VOLT:DC,OL,AUTO,2V")
+	if err != nil {
+		t.Fatalf("parseMeterReply OL: %v", err)
+	}
+	if !m.Overload || m.Unit != "V" {
+		t.Fatalf("meter = %+v", m)
+	}
+
+	for _, in := range []string{"", "OFF", "garbage,1,2"} {
+		if _, err := parseMeterReply(in); err == nil {
+			t.Fatalf("parseMeterReply(%q) did not fail", in)
+		}
+	}
+}
+
+func TestGetStateIncludesMeter(t *testing.T) {
+	f := &fakePort{rx: []byte(
+		"5.010,0.000,0.000,OFF,OFF,OFF,1\r\n" + // MEASure:ALL:INFO?
+			"ON\r\n" + // OUTP?
+			"VOLT:DC,+0.0006V,AUTO,2V\r\n" + // :CONFigure:ALL?
+			"OFF\r\n" + // MULTimeter:HOLD?
+			"OFF\r\n", // :VOLT:DC:NULL?
+	)}
+	s := newTestDevice(f)
+	s.hasMeter = true
+
+	st, err := s.GetState(context.Background())
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if st.Meter == nil {
+		t.Fatal("state has no meter reading")
+	}
+	if st.Meter.Value != 0.0006 || st.Meter.Unit != "V" {
+		t.Fatalf("meter = %+v", st.Meter)
+	}
+}
+
+func newMeterDevice(f *fakePort) *SPM3051 {
+	s := newTestDevice(f)
+	s.hasMeter = true
+	s.meter = &device.MeterState{Func: "VOLT:DC"}
+	return s
+}
+
+func TestSetMeterHold(t *testing.T) {
+	f := &fakePort{rx: []byte(
+		"VOLT:DC,+0.0006V,AUTO,2V\r\n" + // :CONFigure:ALL?
+			"ON\r\n" + // MULTimeter:HOLD?
+			"OFF\r\n", // :VOLT:DC:NULL?
+	)}
+	s := newMeterDevice(f)
+	t.Cleanup(func() { stopReleaseTimer(s) })
+
+	if err := s.SetMeterHold(context.Background(), true); err != nil {
+		t.Fatalf("SetMeterHold: %v", err)
+	}
+	want := []string{
+		"SYSTem:REMote\r\n",
+		"MULTimeter:HOLD ON\r\n",
+		":CONFigure:ALL?\n", "MULTimeter:HOLD?\n", ":VOLT:DC:NULL?\n",
+	}
+	if got := f.written(); !slices.Equal(got, want) {
+		t.Fatalf("writes = %q, want %q", got, want)
+	}
+	if s.meter == nil || !s.meter.Hold {
+		t.Fatalf("meter = %+v, want hold", s.meter)
+	}
+}
+
+func TestSetMeterFunctionFallback(t *testing.T) {
+	f := &fakePort{rx: []byte(
+		// First candidate (CONFigure:VOLT:AC) is ignored by the device.
+		"VOLT:DC,+0.0006V,AUTO,2V\r\n" + "OFF\r\n" + "OFF\r\n" +
+			// Fallback (FUNCtion "VOLT:AC") works.
+			"VOLT:AC,+0.5000V,AUTO,2V\r\n" + "OFF\r\n" + "OFF\r\n",
+	)}
+	s := newMeterDevice(f)
+	t.Cleanup(func() { stopReleaseTimer(s) })
+
+	if err := s.SetMeterFunction(context.Background(), "VOLT:AC"); err != nil {
+		t.Fatalf("SetMeterFunction: %v", err)
+	}
+	want := []string{
+		"SYSTem:REMote\r\n",
+		"CONFigure:VOLT:AC\r\n",
+		":CONFigure:ALL?\n", "MULTimeter:HOLD?\n", ":VOLT:DC:NULL?\n",
+		"FUNCtion \"VOLT:AC\"\r\n",
+		":CONFigure:ALL?\n", "MULTimeter:HOLD?\n", ":VOLT:AC:NULL?\n",
+	}
+	if got := f.written(); !slices.Equal(got, want) {
+		t.Fatalf("writes = %q, want %q", got, want)
+	}
+	if s.meter == nil || s.meter.Func != "VOLT:AC" {
+		t.Fatalf("meter = %+v, want VOLT:AC", s.meter)
+	}
+}
+
+func TestSetMeterAutoRange(t *testing.T) {
+	f := &fakePort{rx: []byte(
+		"VOLT:DC,+0.0006V,AUTO,2V\r\n" + "OFF\r\n" + "OFF\r\n",
+	)}
+	s := newMeterDevice(f)
+	t.Cleanup(func() { stopReleaseTimer(s) })
+
+	if err := s.SetMeterAutoRange(context.Background(), true); err != nil {
+		t.Fatalf("SetMeterAutoRange: %v", err)
+	}
+	want := []string{
+		"SYSTem:REMote\r\n",
+		"VOLT:DC:RANGE:AUTO ON\r\n",
+		":CONFigure:ALL?\n", "MULTimeter:HOLD?\n", ":VOLT:DC:NULL?\n",
+	}
+	if got := f.written(); !slices.Equal(got, want) {
+		t.Fatalf("writes = %q, want %q", got, want)
+	}
+}
+
+func TestSetMeterRange(t *testing.T) {
+	f := &fakePort{rx: []byte(
+		"VOLT:DC,+2.0000V,MAN,2V\r\n" + "OFF\r\n" + "OFF\r\n",
+	)}
+	s := newMeterDevice(f)
+	t.Cleanup(func() { stopReleaseTimer(s) })
+
+	if err := s.SetMeterRange(context.Background(), 2); err != nil {
+		t.Fatalf("SetMeterRange: %v", err)
+	}
+	want := []string{
+		"SYSTem:REMote\r\n",
+		"VOLT:DC:RANGE 2\r\n",
+		":CONFigure:ALL?\n", "MULTimeter:HOLD?\n", ":VOLT:DC:NULL?\n",
+	}
+	if got := f.written(); !slices.Equal(got, want) {
+		t.Fatalf("writes = %q, want %q", got, want)
+	}
+}
+
+func TestSetMeterNull(t *testing.T) {
+	f := &fakePort{rx: []byte(
+		"VOLT:DC,+0.0006V,AUTO,2V\r\n" + "OFF\r\n" + "ON\r\n",
+	)}
+	s := newMeterDevice(f)
+	t.Cleanup(func() { stopReleaseTimer(s) })
+
+	if err := s.SetMeterNull(context.Background(), true); err != nil {
+		t.Fatalf("SetMeterNull: %v", err)
+	}
+	want := []string{
+		"SYSTem:REMote\r\n",
+		":VOLT:DC:NULL ON\r\n",
+		":CONFigure:ALL?\n", "MULTimeter:HOLD?\n", ":VOLT:DC:NULL?\n",
+	}
+	if got := f.written(); !slices.Equal(got, want) {
+		t.Fatalf("writes = %q, want %q", got, want)
+	}
+}
+
+func TestSetMeterFunctionRejectsUnknown(t *testing.T) {
+	f := &fakePort{}
+	s := newMeterDevice(f)
+	if err := s.SetMeterFunction(context.Background(), "BOGUS"); err == nil {
+		t.Fatal("SetMeterFunction accepted an unknown function")
+	}
+	if got := f.written(); len(got) != 0 {
+		t.Fatalf("unexpected writes %q", got)
 	}
 }
 
