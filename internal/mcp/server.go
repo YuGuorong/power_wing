@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yuguorong/power_wing/internal/config"
+	"github.com/yuguorong/power_wing/internal/device/ftdivbus"
 	"github.com/yuguorong/power_wing/internal/manager"
 	"github.com/yuguorong/power_wing/internal/serialport"
 	"github.com/yuguorong/power_wing/internal/version"
@@ -339,6 +340,25 @@ func (s *Server) callTool(name string, args map[string]interface{}) (interface{}
 		}
 		return map[string]interface{}{"ports": ports}, nil
 
+	case "powerwing_list_ftdi_boards":
+		boards, err := ftdivbus.Boards()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"boards": boards}, nil
+
+	case "powerwing_read_vbus_state":
+		id, err := stringArg(args, "device_id")
+		if err != nil {
+			return nil, err
+		}
+		serial, _ := optionalStringArg(args, "serial")
+		st, err := s.mgr.ReadVBusState(id, serial)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"device_id": id, "state": st}, nil
+
 	case "powerwing_disconnect_device":
 		id, err := stringArg(args, "device_id")
 		if err != nil {
@@ -396,14 +416,24 @@ func (s *Server) callTool(name string, args map[string]interface{}) (interface{}
 		cfg := s.mgr.Config()
 		devs := make([]map[string]interface{}, 0, len(cfg.Devices))
 		for _, d := range cfg.Devices {
-			devs = append(devs, map[string]interface{}{
+			entry := map[string]interface{}{
 				"id":      d.ID,
 				"name":    d.Name,
 				"type":    d.Type,
 				"port":    d.Port,
 				"baud":    d.Baud,
 				"enabled": d.Enabled,
-			})
+			}
+			if d.Serial != "" {
+				entry["serial"] = d.Serial
+			}
+			if d.Pin != 0 {
+				entry["pin"] = d.Pin
+			}
+			if d.ActiveLow != nil {
+				entry["active_low"] = *d.ActiveLow
+			}
+			devs = append(devs, entry)
 		}
 		return map[string]interface{}{
 			"devices":       devs,
@@ -510,6 +540,18 @@ func deviceConfigFromArgs(obj map[string]interface{}) (config.DeviceConfig, erro
 	if b, ok := parseOptionalBool(obj["enabled"]); ok {
 		dc.Enabled = b
 	}
+	// FTDI VBUS wiring (type "ftdi_vbus").
+	if v, ok := optionalStringArg(obj, "serial"); ok {
+		dc.Serial = v
+	}
+	if v, err := optionalIntArg(obj, "pin"); err != nil {
+		return dc, err
+	} else if v != 0 {
+		dc.Pin = v
+	}
+	if b, ok := parseOptionalBool(obj["active_low"]); ok {
+		dc.ActiveLow = &b
+	}
 	return dc, nil
 }
 
@@ -536,7 +578,7 @@ func toolDefs() []map[string]interface{} {
 		},
 		{
 			"name":        "powerwing_send_command",
-			"description": "Send a device command (for example set_volt, set_curr, set_outp, release_control, set_usb_port).",
+			"description": "Send a device command (for example set_volt, set_curr, set_outp, release_control, set_usb_port, set_vbus, vbus_read_state).",
 			"inputSchema": schemaObject(
 				map[string]interface{}{
 					"device_id": schemaString("Device ID."),
@@ -553,6 +595,22 @@ func toolDefs() []map[string]interface{} {
 			"name":        "powerwing_list_serial_ports",
 			"description": "List host serial ports that can be used for device reconnect.",
 			"inputSchema": schemaObject(nil, nil),
+		},
+		{
+			"name":        "powerwing_list_ftdi_boards",
+			"description": "List the FTDI boards D2XX can currently name (serial + description). No board is opened.",
+			"inputSchema": schemaObject(nil, nil),
+		},
+		{
+			"name":        "powerwing_read_vbus_state",
+			"description": "Read the currently latched VBUS state of an ftdi_vbus controller by temporarily opening the selected FTDI board, then closing it. No long-lived connection is created.",
+			"inputSchema": schemaObject(
+				map[string]interface{}{
+					"device_id": schemaString("VBUS controller device ID."),
+					"serial":    schemaString("Optional FTDI board serial; omit to use the default/last selection."),
+				},
+				[]string{"device_id"},
+			),
 		},
 		{
 			"name":        "powerwing_disconnect_device",
@@ -593,7 +651,7 @@ func toolDefs() []map[string]interface{} {
 			"description": "Check whether configured devices of the given type are connected on their configured serial ports. Only configured ports are opened; host ports are enumerated for presence reporting only.",
 			"inputSchema": schemaObject(
 				map[string]interface{}{
-					"device_type": schemaString("Device type: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, or powerz."),
+					"device_type": schemaString("Device type: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz, or ftdi_vbus."),
 				},
 				[]string{"device_type"},
 			),
@@ -615,7 +673,7 @@ func toolDefs() []map[string]interface{} {
 							map[string]interface{}{
 								"id":      schemaString("Device ID, e.g. PSU1."),
 								"name":    schemaString("Display name."),
-								"type":    schemaString("Device type: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, or powerz."),
+								"type":    schemaString("Device type: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz, or ftdi_vbus."),
 								"port":    schemaString("Serial port from powerwing_list_serial_ports, e.g. COM3 or /dev/ttyUSB0."),
 								"baud":    map[string]interface{}{"type": "integer", "description": "Baud rate; 0 or omitted = driver default."},
 								"enabled": map[string]interface{}{"type": "boolean", "description": "Whether the device is enabled."},
@@ -765,9 +823,15 @@ func (s *Server) writeResponse(res rpcResponse) error {
 // connected (held by the manager) are reported from live state instead of
 // being probed, so the open handle is not disturbed.
 func probeConfiguredDevices(mgr *manager.Manager, devType string) ([]map[string]interface{}, error) {
+	// FTDI VBUS boards are addressed by D2XX serial number, not by a COM
+	// port, so they are probed by enumeration instead of by opening a port.
+	if strings.EqualFold(devType, ftdivbus.TypeName) {
+		return probeVBusDevices(mgr)
+	}
+
 	baud, probeCmd, respWait := probeParams(devType)
 	if probeCmd == nil {
-		return nil, fmt.Errorf("unsupported device type: %s (valid: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz)", devType)
+		return nil, fmt.Errorf("unsupported device type: %s (valid: spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz, ftdi_vbus)", devType)
 	}
 
 	// Enumerate host ports (list only — nothing is opened here).
@@ -817,6 +881,56 @@ func probeConfiguredDevices(mgr *manager.Manager, devType string) ([]map[string]
 			entry["reason"] = "port is in use by another connected device"
 		default:
 			entry["matched"] = probePort("probe:"+devType, d.Port, baud, probeCmd, respWait)
+		}
+		results = append(results, entry)
+	}
+	return results, nil
+}
+
+// probeVBusDevices reports whether the configured FTDI VBUS boards are
+// currently enumerable over D2XX.  Nothing is opened: a board whose VCP port
+// is held by another program may not be nameable and is reported as absent.
+func probeVBusDevices(mgr *manager.Manager) ([]map[string]interface{}, error) {
+	boards, err := ftdivbus.Boards()
+	if err != nil {
+		return nil, fmt.Errorf("FTDI enumeration: %w", err)
+	}
+	present := make(map[string]ftdivbus.Board, len(boards))
+	for _, b := range boards {
+		present[strings.ToUpper(strings.TrimSpace(b.Serial))] = b
+	}
+
+	var results []map[string]interface{}
+	for _, d := range mgr.Devices() {
+		if !strings.EqualFold(d.Type, ftdivbus.TypeName) {
+			continue
+		}
+		entry := map[string]interface{}{
+			"device_id": d.ID,
+			"name":      d.Name,
+			"serial":    d.Serial,
+			"pin":       d.Pin,
+		}
+		switch {
+		case d.Connected:
+			entry["matched"] = true
+			entry["reason"] = "device is connected via manager"
+		case d.Serial != "":
+			if _, ok := present[strings.ToUpper(strings.TrimSpace(d.Serial))]; ok {
+				entry["matched"] = true
+				entry["reason"] = "FTDI board with the configured serial is attached"
+			} else {
+				entry["matched"] = false
+				entry["reason"] = "no attached FTDI board has the configured serial (or its VCP port is held by another program)"
+			}
+		default:
+			if len(boards) == 0 {
+				entry["matched"] = false
+				entry["reason"] = "no FTDI board detected"
+			} else {
+				entry["matched"] = true
+				entry["reason"] = "FTDI board detected (auto-selected on connect)"
+			}
 		}
 		results = append(results, entry)
 	}

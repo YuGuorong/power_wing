@@ -16,7 +16,8 @@ This document describes everything an external client can call:
 Per-device, protocol-level notes live in the sibling documents
 ([api_spm3051.md](api_spm3051.md), [api_powerz.md](api_powerz.md),
 [api_f11.md](api_f11.md), [api_sangenxian.md](api_sangenxian.md),
-[api_usbslim.md](api_usbslim.md), [api_usbalarm.md](api_usbalarm.md)).
+[api_usbslim.md](api_usbslim.md), [api_usbalarm.md](api_usbalarm.md),
+[api_ftdi_vbus.md](api_ftdi_vbus.md)).
 
 ---
 
@@ -41,8 +42,12 @@ Device types and their defaults:
 | `usbalarm` | alarm light | 4800 | Modbus RTU RGB beacon |
 | `f11` | power monitor | 38400 | AFU IoT current/voltage meter |
 | `powerz` | power monitor | 115200 (ignored) | ChargerLAB KM002C/KM003C |
+| `ftdi_vbus` | VBUS control | — | FTDI FT230XQ CBUS pin over D2XX; Windows only, no COM port |
 
 `baud: 0` in a configuration means "use the driver default".
+
+An `ftdi_vbus` entry uses `serial`, `pin` and `active_low` instead of
+`port`/`baud` — see [api_ftdi_vbus.md](api_ftdi_vbus.md).
 
 ---
 
@@ -97,7 +102,24 @@ curl -X POST http://localhost:8765/api/device/psu1/cmd \
 ```
 
 A command on a device that is registered but disconnected **lazy-connects** it
-first (unless it was explicitly disconnected by the user).
+first (unless it was explicitly disconnected by the user). For `ftdi_vbus`,
+"connect" only checks that D2XX is usable — no board is opened.
+
+#### 2.3.1 FTDI VBUS-only endpoints
+
+`ftdi_vbus` controllers hold no connection. These two actions support the
+board dropdown and the transient state read; both open the board only for the
+duration of the request.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/device/{id}/boards` | List the FTDI boards D2XX can name (never opens one) |
+| GET | `/api/device/{id}/vbus-state?serial=...` | One transient open/read/close; returns a `VBusState` (§5.5) |
+
+```bash
+curl http://localhost:8765/api/device/vbus1/boards
+curl "http://localhost:8765/api/device/vbus1/vbus-state?serial=DKYGR02"
+```
 
 ### 2.4 `POST /api/device/{id}/all-on` and `/all-off`
 
@@ -328,6 +350,20 @@ Color names: `red`, `yellow`, `green`, `white`, `cyan`, `purple`, `blue`,
 | `monitor_start` | — | Start average/peak accumulation |
 | `monitor_stop` | — | Stop accumulation |
 
+### 4.6 VBUS control (ftdi_vbus)
+
+| Command | Params | Description |
+|---------|--------|-------------|
+| `set_vbus` | `on` bool, `serial`? string | One-shot open → drive the FT230XQ CBUS pin → read-back verify → close. The level is latched by the board. |
+| `vbus_read_state` | `serial`? string | One transient open/read/close of the latched level; the fresh state is cached and broadcast. |
+
+Neither command holds the port after it returns, and neither waits for or
+retries a held port. `serial` selects the board; omit it to use the
+configured default or the last selection.
+
+Windows only; requires `ftd2xx.dll` and the CBUS pin programmed as GPIO in the
+device EEPROM. See [api_ftdi_vbus.md](api_ftdi_vbus.md).
+
 ---
 
 ## 5. State objects
@@ -427,6 +463,22 @@ e.g. `2V`), `auto_range`, `hold`, `null`, and `overload` (reading was `OL`).
 }
 ```
 
+### 5.5 VBUS control (`VBusState`)
+
+```json
+{
+  "connected": true,
+  "vbus_on": true,
+  "known": true,
+  "serial": "DK0MAQPC",
+  "pin": 0,
+  "active_low": true
+}
+```
+
+`vbus_on` is meaningful only while `known` is true (the latched level has been
+read or commanded). `last_error` appears after a driver error.
+
 ---
 
 ## 6. MCP server
@@ -502,6 +554,27 @@ Returns `{"status":"ok","device_id":"...","command":"..."}`.
 
 No arguments. Returns `{"ports": ["COM3", ...]}`.
 
+#### `powerwing_list_ftdi_boards`
+
+No arguments. Lists the FTDI boards D2XX can currently name; never opens one.
+
+```json
+{ "boards": [
+  { "serial": "DKYGR02", "description": "FT230X Basic UART", "type": 9 }
+] }
+```
+
+#### `powerwing_read_vbus_state`
+
+One transient open/read/close of an `ftdi_vbus` controller's selected board.
+
+| Argument | Type | Required | Description |
+|----------|------|----------|-------------|
+| `device_id` | string | yes | VBUS controller device ID |
+| `serial` | string | no | FTDI board serial; omit for the default/last selection |
+
+Returns `{"device_id":"...","state":{...}}` (see §5.5).
+
 #### `powerwing_disconnect_device`
 
 | Argument | Type | Required |
@@ -533,7 +606,7 @@ Returns `{"status":"ok","device_id":"...","name":"..."}`.
 
 | Argument | Type | Required | Description |
 |----------|------|----------|-------------|
-| `device_type` | string | yes | `spm3051`, `pd_pocket`, `usbslim`, `sangenxian`, `usbalarm`, `f11`, `powerz` |
+| `device_type` | string | yes | `spm3051`, `pd_pocket`, `usbslim`, `sangenxian`, `usbalarm`, `f11`, `powerz`, `ftdi_vbus` |
 
 Checks **configured** devices of that type only; non-configured ports are never
 opened. Returns:
@@ -580,6 +653,8 @@ Two mutually exclusive forms:
 ```
 
 Entries require `id` and `type`; `name`, `port`, `baud`, `enabled` are optional.
+For `type: "ftdi_vbus"`, pass `serial` (string), `pin` (0–3) and `active_low`
+(bool) instead of `port`/`baud`.
 The manager validates IDs (unique, non-empty), ports (unique), and types, then
 reconciles live drivers and persists the result.
 

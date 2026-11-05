@@ -10,10 +10,26 @@ import (
 type DeviceConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Type    string `json:"type"` // "spm3051", "pd_pocket", "usbslim", "sangenxian", "usbalarm", "f11", "powerz"
-	Port    string `json:"port"` // e.g. "COM3" or "/dev/ttyUSB0"
+	Type    string `json:"type"` // "spm3051", "pd_pocket", "usbslim", "sangenxian", "usbalarm", "f11", "powerz", "ftdi_vbus"
+	Port    string `json:"port"` // e.g. "COM3" or "/dev/ttyUSB0"; empty for ftdi_vbus
 	Baud    int    `json:"baud"` // 0 = use driver default
 	Enabled bool   `json:"enabled"`
+
+	// FTDI VBUS control (type "ftdi_vbus").  D2XX addresses the board by
+	// serial number, not by COM port.
+	Serial string `json:"serial,omitempty"` // board serial; empty = first FT-X board
+	Pin    int    `json:"pin,omitempty"`    // CBUS pin driving VBUS, 0-3
+	// ActiveLow is a pointer so that an absent key means the default (true =
+	// pin low turns VBUS on), while an explicit false is preserved.
+	ActiveLow *bool `json:"active_low,omitempty"`
+}
+
+// ActiveLowOrDefault reports the configured polarity, defaulting to true.
+func (d DeviceConfig) ActiveLowOrDefault() bool {
+	if d.ActiveLow == nil {
+		return true
+	}
+	return *d.ActiveLow
 }
 
 // Config is the application-level configuration.

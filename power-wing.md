@@ -1,4 +1,4 @@
-# PowerWing - Cross-Platform Power Supply & USB Hub Controller
+0# PowerWing - Cross-Platform Power Supply & USB Hub Controller
 
 **Runs on:** Windows 10/11 and Ubuntu Linux (all versions)
 
@@ -17,6 +17,7 @@
 11. **Serial Port Debug** — Settings panel showing every serial open/close with owner, baud and caller
 12. **Windowless Background Mode** — Double-click `power_wing.exe` to run in the system tray without a console window
 13. **All Ports ON/OFF** — One-click master switches in every hub panel and `all-on` / `all-off` REST endpoints
+14. **DUT VBUS Toggle** — Switch a DUT's VBUS through an FTDI FT230XQ CBUS pin over D2XX (Windows)
 
 ## Supported Hardware
 
@@ -27,6 +28,7 @@
 - **USB Alarm Light** — Modbus RTU 7-color alarm light (4800 baud) — see [alarm_light_api.md](alarm_light_api.md)
 - **F-11** — AFU IoT current/voltage monitor (38400 baud) — see [docs/api_f11.md](docs/api_f11.md)
 - **POWER-Z** — ChargerLAB KM002C/KM003C USB power meter (CDC port, baud ignored) — see [docs/api_powerz.md](docs/api_powerz.md)
+- **FTDI FT230XQ VBUS** — DUT VBUS on/off through a CBUS pin over D2XX (Windows only; `ftd2xx.dll` required) — see [docs/api_ftdi_vbus.md](docs/api_ftdi_vbus.md)
 
 ## Serial Port Safety
 
@@ -193,12 +195,14 @@ All tools work on both Windows and Linux:
 
 - **powerwing_list_devices** — List all configured devices with connection status
 - **powerwing_get_device_state** — Get current measured values and settings
-- **powerwing_send_command** — Execute device command (set_volt, set_outp, set_usb_port, release_control, meter_set_*, etc. — see [docs/api_reference.md §4](docs/api_reference.md#4-device-commands))
+- **powerwing_send_command** — Execute device command (set_volt, set_outp, set_usb_port, set_vbus, release_control, meter_set_*, etc. — see [docs/api_reference.md §4](docs/api_reference.md#4-device-commands))
 - **powerwing_list_serial_ports** — Enumerate available serial ports
+- **powerwing_list_ftdi_boards** — List the FTDI boards D2XX can name (no board is opened)
+- **powerwing_read_vbus_state** — One transient read of an `ftdi_vbus` board's latched VBUS state
 - **powerwing_disconnect_device** — Disconnect device (manual mode)
 - **powerwing_reconnect_device** — Reconnect device with optional new port/baud
 - **powerwing_rename_device** — Change device display name
-- **powerwing_test_connection** — Check whether configured devices of a type (spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz) respond on their configured ports (never opens non-configured ports)
+- **powerwing_test_connection** — Check whether configured devices of a type (spm3051, pd_pocket, usbslim, sangenxian, usbalarm, f11, powerz, ftdi_vbus) respond on their configured ports (never opens non-configured ports)
 - **powerwing_get_config** — Return the full current configuration (all devices, server port, feature flags)
 - **powerwing_set_config** — Set configuration (counterpart of get_config): pass the full `devices` list, or `device_id` + optional name/port/baud/enabled to update one device; omitted fields keep current values. Use with `powerwing_list_serial_ports` to assign ports.
 

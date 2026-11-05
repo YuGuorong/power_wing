@@ -138,6 +138,9 @@ function toggleDevicePanel(id) {
   tab?.classList.toggle('panel-off', hiding);
   if (!hiding) {
     showDevices();
+    // VBUS pages refresh the board list and read the selected board's state
+    // on entry (one transient open/close; no connection is held).
+    page._vbusRefresh?.();
     page.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 }
@@ -155,6 +158,8 @@ function isHub(type) { return type === 'usbslim' || type === 'sangenxian' || typ
 function isAlarm(type) { return type === 'usbalarm' || type === 'alarm_light'; }
 /** Returns true for power monitor (F-11, POWER-Z) device types. */
 function isMonitor(type) { return type === 'f11' || type === 'powerz' || type === 'power_monitor'; }
+/** Returns true for FTDI CBUS VBUS control. */
+function isVbus(type) { return type === 'ftdi_vbus' || type === 'vbus_control'; }
 
 function ensureDevicePage(d) {
   if (document.getElementById(`page-${d.id}`)) return;
@@ -163,6 +168,7 @@ function ensureDevicePage(d) {
   if (isHub(d.type)) tplId = 'tpl-hub';
   else if (isAlarm(d.type)) tplId = 'tpl-alarm';
   else if (isMonitor(d.type)) tplId = 'tpl-monitor';
+  else if (isVbus(d.type)) tplId = 'tpl-vbus';
 
   const tpl = document.getElementById(tplId);
   if (!tpl) return;
@@ -177,6 +183,8 @@ function ensureDevicePage(d) {
     buildAlarmPage(clone, d);
   } else if (isMonitor(d.type)) {
     buildMonitorPage(clone, d);
+  } else if (isVbus(d.type)) {
+    buildVbusPage(clone, d);
   } else {
     buildPsuPage(clone, d);
   }
@@ -936,6 +944,155 @@ function drawMonitorChart(el, deviceId) {
   }
 }
 
+// ─── FTDI VBUS control page ───────────────────────────────────────────────────
+//
+// There is no connect step and no persistent handle.  The board dropdown is
+// refreshed when entering the page, when the dropdown is about to open, and by
+// the ⟳ button.  Selecting a board performs one transient read of its latched
+// level; ON/OFF likewise opens the board briefly and closes it again.
+
+function vbusStorageKey(id) { return `vbus-serial:${id}`; }
+
+function setVbusDetail(el, text) {
+  const detail = $('.vbus-detail', el);
+  if (detail) detail.textContent = text;
+}
+
+/** Reload the FTDI board dropdown, then optionally read the selected board. */
+async function loadVbusBoards(el, d, { readState = true } = {}) {
+  const sel = $('.vbus-board-sel', el);
+  if (!sel) return;
+  const want = sel.value || localStorage.getItem(vbusStorageKey(d.id)) || d.serial || '';
+  try {
+    const resp = await fetch(`/api/device/${d.id}/boards`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || 'board list failed');
+    }
+    const boards = await resp.json() || [];
+    sel.innerHTML = '';
+    if (boards.length === 0) {
+      sel.appendChild(new Option('(no FTDI board detected)', ''));
+    } else {
+      boards.forEach(b => {
+        const label = b.description ? `${b.serial} — ${b.description}` : b.serial;
+        sel.appendChild(new Option(label, b.serial));
+      });
+      if (want && boards.some(b => b.serial === want)) sel.value = want;
+      else sel.selectedIndex = 0;
+    }
+    if (readState) await readVbusState(el, d);
+  } catch (e) {
+    setVbusDetail(el, String(e.message || e));
+  }
+}
+
+/** One transient read of the selected board's latched VBUS level. */
+async function readVbusState(el, d) {
+  const sel = $('.vbus-board-sel', el);
+  const serial = sel ? sel.value : '';
+  const q = serial ? `?serial=${encodeURIComponent(serial)}` : '';
+  try {
+    const resp = await fetch(`/api/device/${d.id}/vbus-state${q}`);
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(body.error || 'read failed');
+    updateVbusPage(el, body);
+    if (serial) localStorage.setItem(vbusStorageKey(d.id), serial);
+  } catch (e) {
+    const stateEl = $('.vbus-state-value', el);
+    if (stateEl) {
+      stateEl.textContent = 'UNKNOWN';
+      stateEl.className = 'vbus-state-value';
+    }
+    setVbusDetail(el, String(e.message || e));
+  }
+}
+
+function buildVbusPage(el, d) {
+  wireDeviceNameLabel(el, d);
+
+  const sel = $('.vbus-board-sel', el);
+  const refreshBtn = $('.vbus-refresh', el);
+
+  // Throttle list refreshes: focus + mousedown can both fire.
+  let lastListRefresh = 0;
+  const refreshList = () => {
+    const now = Date.now();
+    if (now - lastListRefresh < 800) return;
+    lastListRefresh = now;
+    loadVbusBoards(el, d, { readState: false });
+  };
+
+  const reloadAll = () => loadVbusBoards(el, d, { readState: true });
+
+  if (sel) {
+    // Refresh the list right before the dropdown opens.
+    sel.addEventListener('mousedown', refreshList);
+    sel.addEventListener('focus', refreshList);
+    // Selecting a board reads its state temporarily.
+    sel.addEventListener('change', () => {
+      localStorage.setItem(vbusStorageKey(d.id), sel.value || '');
+      readVbusState(el, d);
+    });
+  }
+  if (refreshBtn) refreshBtn.addEventListener('click', reloadAll);
+
+  $$('.btn-vbus', el).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const on = btn.dataset.on === 'true';
+      const serial = sel ? sel.value : '';
+      // The manager opens the board once, switches, verifies and closes it;
+      // the confirmed state arrives over the WebSocket.
+      sendCmd(d.id, 'set_vbus', { on, serial: serial || undefined });
+      const stateEl = $('.vbus-state-value', el);
+      if (stateEl) {
+        stateEl.textContent = on ? 'ON' : 'OFF';
+        stateEl.className = 'vbus-state-value ' + (on ? 'on' : 'off');
+      }
+      $$('.btn-vbus', el).forEach(b => b.classList.toggle('active', b === btn));
+    });
+  });
+
+  // Let the tab handler refresh when the page becomes visible.
+  el._vbusRefresh = reloadAll;
+  reloadAll();
+}
+
+function updateVbusPage(el, s) {
+  if (!s) return;
+  const stateEl = $('.vbus-state-value', el);
+  if (stateEl) {
+    if (!s.known) {
+      stateEl.textContent = 'UNKNOWN';
+      stateEl.className = 'vbus-state-value';
+    } else {
+      stateEl.textContent = s.vbus_on ? 'ON' : 'OFF';
+      stateEl.className = 'vbus-state-value ' + (s.vbus_on ? 'on' : 'off');
+    }
+  }
+
+  const sel = $('.vbus-board-sel', el);
+  if (sel && s.serial && !sel.value) {
+    if (![...sel.options].some(o => o.value === s.serial)) {
+      sel.appendChild(new Option(s.serial, s.serial));
+    }
+    sel.value = s.serial;
+  }
+
+  const parts = [];
+  if (s.serial) parts.push(`board ${s.serial}`);
+  parts.push(`CBUS${s.pin}`);
+  parts.push(s.active_low ? 'active-low' : 'active-high');
+  let detail = parts.join(' · ');
+  if (s.last_error) detail += ` · ${s.last_error}`;
+  setVbusDetail(el, detail);
+
+  $$('.btn-vbus', el).forEach(b => {
+    const isOn = b.dataset.on === 'true';
+    b.classList.toggle('active', !!s.known && isOn === !!s.vbus_on);
+  });
+}
+
 // ─── Server message handler ────────────────────────────────────────────────────
 
 function handleServerMsg(msg) {
@@ -997,6 +1154,8 @@ function updatePage(page, d, s) {
       updateHubPage(page, s, d.id);
     } else if (isAlarm(d.type)) {
       updateAlarmPage(page, s, d.id);
+    } else if (isVbus(d.type)) {
+      updateVbusPage(page, s);
     } else {
       updatePsuPage(page, s);
     }
@@ -1006,6 +1165,50 @@ function updatePage(page, d, s) {
 
 // ─── Port configuration panel ─────────────────────────────────────────────────
 
+/** Make the device-name label click-to-rename (shared by all page types). */
+function wireDeviceNameLabel(el, d) {
+  const nameLabel = $('.device-name-label', el);
+  if (!nameLabel) return;
+  nameLabel.textContent = d.name;
+  nameLabel.addEventListener('click', () => {
+    nameLabel.contentEditable = 'true';
+    nameLabel.focus();
+    const range = document.createRange();
+    range.selectNodeContents(nameLabel);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+  const doRename = async () => {
+    nameLabel.contentEditable = 'false';
+    const newName = nameLabel.textContent.trim();
+    if (!newName || newName === d.name) {
+      nameLabel.textContent = d.name; // revert if unchanged or empty
+      return;
+    }
+    const resp = await fetch(`/api/device/${d.id}/rename`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ name: newName }),
+    }).catch(() => null);
+    if (resp && resp.ok) {
+      d.name = newName;
+      if (state.devices[d.id]) state.devices[d.id].name = newName;
+      // Update all other name labels for this device (e.g. after reconnect).
+      $$('.device-name-label', document.getElementById(`page-${d.id}`) || el)
+        .forEach(l => { if (l !== nameLabel) l.textContent = newName; });
+      renderTabs();
+    } else {
+      nameLabel.textContent = d.name; // revert on error
+    }
+  };
+  nameLabel.addEventListener('blur', doRename);
+  nameLabel.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')  { e.preventDefault(); nameLabel.blur(); }
+    if (e.key === 'Escape') { nameLabel.textContent = d.name; nameLabel.contentEditable = 'false'; }
+  });
+}
+
 function buildPortPanel(el, d) {
   const portSel   = $('.port-sel',      el);
   const baudSel   = $('.baud-sel',      el);
@@ -1013,48 +1216,7 @@ function buildPortPanel(el, d) {
   const indicator = $('.conn-indicator', el);
   if (!portSel || !btn) return;
 
-  // Editable device name label
-  const nameLabel = $('.device-name-label', el);
-  if (nameLabel) {
-    nameLabel.textContent = d.name;
-    nameLabel.addEventListener('click', () => {
-      nameLabel.contentEditable = 'true';
-      nameLabel.focus();
-      const range = document.createRange();
-      range.selectNodeContents(nameLabel);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-    });
-    const doRename = async () => {
-      nameLabel.contentEditable = 'false';
-      const newName = nameLabel.textContent.trim();
-      if (!newName || newName === d.name) {
-        nameLabel.textContent = d.name; // revert if unchanged or empty
-        return;
-      }
-      const resp = await fetch(`/api/device/${d.id}/rename`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ name: newName }),
-      }).catch(() => null);
-      if (resp && resp.ok) {
-        d.name = newName;
-        if (state.devices[d.id]) state.devices[d.id].name = newName;
-        // Update all other name labels for this device (e.g. after reconnect).
-        $$('.device-name-label', document.getElementById(`page-${d.id}`) || el)
-          .forEach(l => { if (l !== nameLabel) l.textContent = newName; });
-        renderTabs();
-      } else {
-        nameLabel.textContent = d.name; // revert on error
-      }
-    };
-    nameLabel.addEventListener('blur', doRename);
-    nameLabel.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter')  { e.preventDefault(); nameLabel.blur(); }
-      if (e.key === 'Escape') { nameLabel.textContent = d.name; nameLabel.contentEditable = 'false'; }
-    });
-  }
+  wireDeviceNameLabel(el, d);
 
   // Pre-fill port/baud from the device config.
   if (d.port) {
@@ -1224,10 +1386,15 @@ async function addDevice(formData) {
     id:      formData.id,
     name:    formData.name,
     type:    formData.type,
-    port:    formData.port,
+    port:    formData.port || '',
     baud:    parseInt(formData.baud, 10),
     enabled: true,
   };
+  if (formData.type === 'ftdi_vbus') {
+    dc.serial = formData.serial || '';
+    dc.pin = Number.isFinite(formData.pin) ? formData.pin : 0;
+    dc.active_low = !!formData.activeLow;
+  }
   const resp = await fetch('/api/config/device', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1322,6 +1489,8 @@ async function connectAll() {
   const failures = [];
   for (const d of Object.values(state.devices)) {
     if (d.connected) continue;
+    // ftdi_vbus has no connection concept; it is opened per read/switch.
+    if (isVbus(d.type)) continue;
     try {
       const resp = await fetch(`/api/device/${d.id}/connect`, {
         method:  'POST',
@@ -1422,19 +1591,33 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (type === 'sangenxian') baud.value = '4800';
     else if (type === 'f11') baud.value = '38400';
     else if (type === 'powerz') baud.value = '115200';
+
+    // FTDI VBUS boards have no COM port; they are addressed by serial number.
+    const isFtdi = type === 'ftdi_vbus';
+    document.getElementById('df-ftdi-fields')?.classList.toggle('hidden', !isFtdi);
+    const portInput = document.getElementById('df-port');
+    if (portInput) portInput.required = !isFtdi;
   });
 
   // Submit device form
   document.getElementById('device-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    await addDevice({
+    const type = document.getElementById('df-type').value;
+    const entry = {
       id:   document.getElementById('df-id').value.trim(),
       name: document.getElementById('df-name').value.trim(),
-      type: document.getElementById('df-type').value,
+      type,
       port: document.getElementById('df-port').value.trim(),
       baud: document.getElementById('df-baud').value,
-    });
+    };
+    if (type === 'ftdi_vbus') {
+      entry.serial = document.getElementById('df-serial').value.trim();
+      entry.pin = parseInt(document.getElementById('df-pin').value, 10) || 0;
+      entry.activeLow = document.getElementById('df-active-low').checked;
+    }
+    await addDevice(entry);
     document.getElementById('device-form').reset();
+    document.getElementById('df-ftdi-fields')?.classList.add('hidden');
   });
 
   // Load saved devices immediately from HTTP API, then open WebSocket for live updates

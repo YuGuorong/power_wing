@@ -150,6 +150,41 @@ type AlarmState struct {
 	FlashInterval int    `json:"flash_interval"`
 }
 
+// ─── VBUS control ─────────────────────────────────────────────────────────────
+
+// VBusController extends Device with DUT VBUS switching through the CBUS pin
+// of an FTDI FT230XQ board (D2XX, Windows only).
+//
+// A controller holds no connection: each ReadState/SetVBus call opens the
+// selected board, acts, and closes it again.  serial selects the board; an
+// empty string uses the configured default or the last selection.
+type VBusController interface {
+	Device
+	// GetState returns the cached state without touching the hardware.
+	GetState(ctx context.Context) (*VBusState, error)
+	// ReadState temporarily opens the board, reads the latched CBUS level and
+	// closes it before returning.  serial may be empty to use the default.
+	ReadState(ctx context.Context, serial string) (*VBusState, error)
+	// SetVBus drives the selected CBUS pin to the requested VBUS state and
+	// verifies the read-back.  The level is latched by the device.
+	SetVBus(ctx context.Context, serial string, on bool) error
+}
+
+// VBusState carries everything the UI needs to render a VBUS control page.
+type VBusState struct {
+	Connected bool `json:"connected"`
+	// VBusOn is the last commanded (or observed) VBUS state.  It is only
+	// meaningful when Known is true.
+	VBusOn bool `json:"vbus_on"`
+	Known  bool `json:"known"`
+	// Wiring resolved from the device configuration.
+	Serial    string `json:"serial,omitempty"`
+	Pin       int    `json:"pin"`
+	ActiveLow bool   `json:"active_low"`
+	// LastError is the most recent driver error (empty when healthy).
+	LastError string `json:"last_error,omitempty"`
+}
+
 // ─── Power monitor meter ──────────────────────────────────────────────────────
 
 // PowerMonitor extends Device with continuous current/voltage streaming and

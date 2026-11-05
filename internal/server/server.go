@@ -155,6 +155,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		entry := map[string]interface{}{
 			"id": d.ID, "type": d.Type, "name": d.Name, "connected": d.Connected,
 			"port": d.Port, "baud": d.Baud,
+			"serial": d.Serial, "pin": d.Pin,
+		}
+		if d.ActiveLow != nil {
+			entry["active_low"] = *d.ActiveLow
 		}
 		if st, ok := s.mgr.LatestState(d.ID); ok {
 			entry["state"] = st
@@ -250,6 +254,10 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		entry := map[string]interface{}{
 			"id": d.ID, "type": d.Type, "name": d.Name, "connected": d.Connected,
 			"port": d.Port, "baud": d.Baud,
+			"serial": d.Serial, "pin": d.Pin,
+		}
+		if d.ActiveLow != nil {
+			entry["active_low"] = *d.ActiveLow
 		}
 		if st, ok := s.mgr.LatestState(d.ID); ok {
 			entry["state"] = st
@@ -306,6 +314,40 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]string{"status": "ok"})
+
+	case "boards":
+		// FTDI VBUS board list for the UI dropdown.  Enumerates D2XX only;
+		// no board is opened.
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		boards, err := s.mgr.VBusBoards(id)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, boards)
+
+	case "vbus-state":
+		// One-shot read of the selected board's latched VBUS level.  The
+		// driver opens and closes the board inside this request.
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		st, err := s.mgr.ReadVBusState(id, r.URL.Query().Get("serial"))
+		if st == nil {
+			msg := "read failed"
+			if err != nil {
+				msg = err.Error()
+			}
+			writeError(w, http.StatusBadGateway, msg)
+			return
+		}
+		// st.LastError carries a transient open/read failure; the UI renders
+		// the state as UNKNOWN plus that message.
+		writeJSON(w, st)
 
 	case "all-on", "all-off":
 		if r.Method != http.MethodPost {

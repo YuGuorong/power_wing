@@ -15,6 +15,7 @@ import (
 	"github.com/yuguorong/power_wing/internal/config"
 	"github.com/yuguorong/power_wing/internal/device"
 	"github.com/yuguorong/power_wing/internal/device/f11"
+	"github.com/yuguorong/power_wing/internal/device/ftdivbus"
 	"github.com/yuguorong/power_wing/internal/device/pdpocket"
 	"github.com/yuguorong/power_wing/internal/device/powerz"
 	"github.com/yuguorong/power_wing/internal/device/sangenxian"
@@ -43,6 +44,10 @@ type DeviceInfo struct {
 	Connected bool   `json:"connected"`
 	Port      string `json:"port"`
 	Baud      int    `json:"baud"`
+	// FTDI VBUS wiring (type "ftdi_vbus" only).
+	Serial    string `json:"serial,omitempty"`
+	Pin       int    `json:"pin,omitempty"`
+	ActiveLow *bool  `json:"active_low,omitempty"`
 }
 
 // StateUpdate is pushed to subscribers whenever a device's state changes.
@@ -200,19 +205,13 @@ func (m *Manager) Devices() []DeviceInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []DeviceInfo
-	// Build a port/baud lookup from config for the extra fields.
-	connMap := make(map[string]struct {
-		port string
-		baud int
-	}, len(m.cfg.Devices))
+	// Build a config lookup for the extra metadata fields.
+	cfgMap := make(map[string]config.DeviceConfig, len(m.cfg.Devices))
 	for _, dc := range m.cfg.Devices {
-		connMap[dc.ID] = struct {
-			port string
-			baud int
-		}{dc.Port, dc.Baud}
+		cfgMap[dc.ID] = dc
 	}
 	for _, dev := range m.devices {
-		cm := connMap[dev.ID()]
+		dc := cfgMap[dev.ID()]
 		name := m.renames[dev.ID()]
 		if name == "" {
 			name = dev.Name()
@@ -222,8 +221,11 @@ func (m *Manager) Devices() []DeviceInfo {
 			Name:      name,
 			Type:      dev.Type(),
 			Connected: dev.IsConnected(),
-			Port:      cm.port,
-			Baud:      cm.baud,
+			Port:      dc.Port,
+			Baud:      dc.Baud,
+			Serial:    dc.Serial,
+			Pin:       dc.Pin,
+			ActiveLow: dc.ActiveLow,
 		})
 	}
 	return out
@@ -377,7 +379,7 @@ func (m *Manager) SetConfig(devices []config.DeviceConfig) error {
 	for _, nd := range devices {
 		if dev, ok := live[nd.ID]; ok {
 			od := old[nd.ID]
-			if !nd.Enabled || nd.Port != od.Port || nd.Baud != od.Baud {
+			if !nd.Enabled || connChanged(od, nd) {
 				_ = dev.Disconnect()
 				m.mu.Lock()
 				delete(m.devices, nd.ID)
@@ -693,6 +695,59 @@ func (m *Manager) RemoveDevice(id string) error {
 	return m.cfg.Save()
 }
 
+// VBusBoards lists the FTDI boards D2XX can currently name for a VBUS
+// controller.  It never opens a board.
+func (m *Manager) VBusBoards(id string) ([]ftdivbus.Board, error) {
+	m.mu.RLock()
+	dev, ok := m.devices[id]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown device %q", id)
+	}
+	if _, ok := dev.(device.VBusController); !ok {
+		return nil, fmt.Errorf("%s is not a VBUS controller", id)
+	}
+	return ftdivbus.Boards()
+}
+
+// ReadVBusState performs a one-shot read of a VBUS controller's selected board
+// (serial may be empty) and caches/broadcasts the result.  The driver closes
+// the board before returning, so no handle is held.
+func (m *Manager) ReadVBusState(id, serial string) (*device.VBusState, error) {
+	m.mu.RLock()
+	dev, ok := m.devices[id]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown device %q", id)
+	}
+	vb, ok := dev.(device.VBusController)
+	if !ok {
+		return nil, fmt.Errorf("%s is not a VBUS controller", id)
+	}
+	if !dev.IsConnected() {
+		// Connect only checks that D2XX is usable; it does not open a board.
+		if err := dev.Connect(); err != nil {
+			return nil, fmt.Errorf("connect %s: %w", id, err)
+		}
+		m.markEverConnected(id)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	st, err := vb.ReadState(ctx, serial)
+	if st != nil {
+		m.mu.Lock()
+		m.states[id] = st
+		m.mu.Unlock()
+		m.broadcast(StateUpdate{
+			DeviceID:   id,
+			DeviceType: dev.Type(),
+			DeviceName: dev.Name(),
+			State:      st,
+		})
+	}
+	return st, err
+}
+
 // ─── background loops ─────────────────────────────────────────────────────────
 
 func (m *Manager) pollLoop() {
@@ -750,6 +805,8 @@ func (m *Manager) pollDevice(id string) {
 		st, err = d.GetState(ctx)
 	case device.PowerMonitor:
 		st, err = d.GetState(ctx)
+	case device.VBusController:
+		st, err = d.GetState(ctx)
 	}
 	if err != nil {
 		log.Printf("[manager] pollDevice %s: %v", id, err)
@@ -793,6 +850,8 @@ func (m *Manager) pollAll() {
 			state, err = d.GetState(ctx)
 		case device.PowerMonitor:
 			state, err = d.GetState(ctx)
+		case device.VBusController:
+			state, err = d.GetState(ctx)
 		}
 		if err != nil {
 			log.Printf("[manager] poll %s: %v", dev.ID(), err)
@@ -822,6 +881,13 @@ func (m *Manager) reconnectAll() {
 		id := dev.ID()
 		if dev.IsConnected() {
 			m.markEverConnected(id)
+			continue
+		}
+		// ftdi_vbus is never auto-reopened.  D2XX shares the board with its
+		// VCP port, so a background retry loop could contend with a serial
+		// session; the user connects explicitly and every command makes a
+		// single open attempt.
+		if dev.Type() == ftdivbus.TypeName {
 			continue
 		}
 		m.mu.RLock()
@@ -1122,6 +1188,32 @@ func (m *Manager) execCmd(req CmdRequest) error {
 		}
 		return hub.SetAutoSave(ctx, enabled)
 
+	// ── VBUS control (FTDI FT230X CBUS) ──────────────────────────────────────
+	case "set_vbus":
+		vb, ok := dev.(device.VBusController)
+		if !ok {
+			return fmt.Errorf("%s is not a VBUS controller", req.DeviceID)
+		}
+		on, err := boolParam(req.Params, "on")
+		if err != nil {
+			return err
+		}
+		serial, _ := optionalStringParam(req.Params, "serial")
+		if err := vb.SetVBus(ctx, serial, on); err != nil {
+			return err
+		}
+		go m.pollDevice(req.DeviceID)
+		return nil
+
+	case "vbus_read_state":
+		// Transient read of the selected board's latched level.  The handle is
+		// closed before the command returns and the fresh state is broadcast.
+		serial, _ := optionalStringParam(req.Params, "serial")
+		if _, err := m.ReadVBusState(req.DeviceID, serial); err != nil {
+			return err
+		}
+		return nil
+
 	// ── alarm light ───────────────────────────────────────────────────────────
 	case "alarm_set_color":
 		al, ok := dev.(device.AlarmLight)
@@ -1329,9 +1421,30 @@ func makeDevice(dc config.DeviceConfig) (device.Device, error) {
 		return f11.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
 	case "powerz":
 		return powerz.New(dc.ID, dc.Name, dc.Port, dc.Baud), nil
+	case "ftdi_vbus":
+		if dc.Pin < 0 || dc.Pin >= ftdivbus.PinCount {
+			return nil, fmt.Errorf("device %q: ftdi_vbus pin must be 0-%d, got %d", dc.ID, ftdivbus.PinCount-1, dc.Pin)
+		}
+		return ftdivbus.New(dc.ID, dc.Name, dc.Serial, dc.Pin, dc.ActiveLowOrDefault()), nil
 	default:
 		return nil, fmt.Errorf("unknown device type %q", dc.Type)
 	}
+}
+
+// connChanged reports whether two configs describe a different physical
+// connection, meaning the live driver must be rebuilt.  Besides the serial
+// port and baud, this covers the FTDI VBUS wiring (serial/pin/polarity).
+func connChanged(a, b config.DeviceConfig) bool {
+	if a.Port != b.Port || a.Baud != b.Baud {
+		return true
+	}
+	if a.Serial != b.Serial || a.Pin != b.Pin {
+		return true
+	}
+	if a.ActiveLowOrDefault() != b.ActiveLowOrDefault() {
+		return true
+	}
+	return false
 }
 
 // ─── param helpers ────────────────────────────────────────────────────────────
